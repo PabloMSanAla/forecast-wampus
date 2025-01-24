@@ -1033,12 +1033,16 @@ int main(int argc, char** argv){
       NpTNG.push_back(countshTNG);
     }
 
+    std::unordered_map<int, int> countSH4;
+    for (auto id : idSH4) {
+      countSH4[id]++;
+    }
     vector<double> CMzsh, NpshTNG;
     for (auto k=0;k<idsh.size();k++){
       for(auto l=0;l<idshs.size();l++){
 	if (idshs[l]==idsh[k]){
 	  CMzsh.push_back(cmzsh[k]);
-	  NpshTNG.push_back(NpTNG[k]);
+	  NpshTNG.push_back(countSH4[idsh[k]]);
 	}
       }
     }
