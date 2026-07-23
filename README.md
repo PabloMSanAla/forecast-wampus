@@ -35,9 +35,15 @@ It requires the following C/C++ standard libraries:
 * gcc compiler
 * [bc03](https://www.bruzual.org/bc03/Original_version_2003/) or [cb16](flaminia.fortuni at inaf.it) SSP models.  
 
+Those requimentes can be installed using a conda environment using the environment.yml file in the repository following command:
+
+```
+conda create env -f environment.yml
+```
+
 ## How to install and run
 - Download the code with the "Code" green button on this page, or clone it with `git clone https://github.com/flaminiafortuni/FORECAST`
-- Download and install the required C/C++ libraries (see [Requirements](#requirements))
+- Download and install the required C/C++ libraries (see [Requirements](#requirements)). If using the conda environment, activate the environment with `conda activate forecast` before running the code.
 - Download the hydrodynamical simulation snapshots as input files (e.g., [IllustrisTNG](https://www.tng-project.org/data/), [EAGLE](https://icc.dur.ac.uk/Eagle/database.php))
 - In each of the four modules ([lc](lc), [df](df), [dc](dc), [igm](igm)):
   1. open the `Makefile` and link proper libraries (change only "LIBS" an "ALLFLAGS" paths; e.g., in line  `-L/usr/local/lib/  -lgsl -lgslcblas  \` change only `/usr/local/lib/`)

@@ -1,0 +1,21 @@
+name: forecast
+channels:
+  - conda-forge
+dependencies:
+  # Compilers and Build Tools
+  - gxx_linux-64       # Use gxx_osx-64 if you are using macOS
+  - make
+  - cmake
+  
+  # Math, Linear Algebra, and Science Libraries
+  - gsl
+  - openblas
+  - lapack
+  - fftw
+  - eigen
+  - armadillo
+  
+  # Astronomy and Data Format Libraries
+  - cfitsio
+  - ccfits
+  - hdf5
