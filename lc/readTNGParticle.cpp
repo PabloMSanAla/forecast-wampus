@@ -6,8 +6,8 @@
 
 #include <vector>
 #include <iostream>
-#include "/usr/include/hdf5/serial/H5Cpp.h"
-#include </usr/include/eigen3/Eigen/Dense>
+#include "H5Cpp.h"
+#include <Eigen/Dense>
 #include "readTNGParticle.h"
 using namespace std;
 

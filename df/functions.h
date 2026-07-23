@@ -58,7 +58,7 @@ int index_closest(std::vector<float>::iterator, std::vector<float>::iterator, fl
 
 void readParameters(double *boxl, double *zs, 
 		    string *filfilters,string *filredshiftlist,string *filsnaplist, string *filtimelist,string *idc, 
-		    string *pathsnap, string *bc03dir, string *rdir,
+		    string *pathsnap, string *lcpath, string *bc03dir, string *agedir, string *rdir,
 		    string *model, string *imf);
 
 bool allNegOne(const std::vector<float>& vec);

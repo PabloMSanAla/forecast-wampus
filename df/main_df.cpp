@@ -19,8 +19,8 @@
 #ifdef COSMOLIB
 #include <cosmo.h>
 #endif
-#include "/usr/include/hdf5/serial/H5Cpp.h"
-#include </usr/include/eigen3/Eigen/Dense>
+#include "H5Cpp.h"
+#include <Eigen/Dense>
 #include "readTNGParticle.h"
 #define ARMA_DONT_USE_WRAPPER
 #include <armadillo>
@@ -85,19 +85,22 @@ int main(int argc, char** argv){
   cout << "   -                 Let there be light!                - " << endl;
   cout << "   ------------------------------------------------------ " << endl;
 
-  // check if the file restart exsits ... 
-  std:: string fileplstart = std::string(argv[2])+".d";
-  int iplrestart=0;
-  std:: ifstream infileplstart;
-  infileplstart.open(fileplstart.c_str());
-  if(infileplstart.is_open()){
+  // Parse command line arguments: first is snapshot, second is plane number, third is planes_list file
+  if(argc < 4) {
     std::cout << " " << std:: endl;
-    std:: cout << " I will read the restart file >> " << fileplstart << std:: endl;
-    infileplstart >> iplrestart;
-    std:: cout << " iplrestart = " << iplrestart << std:: endl;
+    std:: cout << " Usage: " << argv[0] << " <snapshot> <plane_number> <planes_list_file>" << std:: endl;
     std:: cout << " " << std:: endl;
-    infileplstart.close();
+    exit(1);
   }
+
+  int sourceID = atoi(argv[1]);         // snapshot number from first argument
+  int iplrestart = atoi(argv[2]);       // plane number from second argument
+  string fplane = std::string(argv[3]); // planes_list file path from third argument
+  
+  std::cout << " " << std:: endl;
+  std:: cout << " Running with snapshot: " << sourceID << " and plane: " << iplrestart << std:: endl;
+  std:: cout << " Using planes_list file: " << fplane << std:: endl;
+  std:: cout << " " << std:: endl;
 
  
   // ******************** to be read in the INPUT file ********************
@@ -106,12 +109,11 @@ int main(int argc, char** argv){
   // ... input files
   string filredshiftlist,filsnaplist, filtimelist, filfilters, idc;
   // ... directories
-  string pathsnap, bc03dir, rdir; 
+  string pathsnap, bc03dir, agedir, rdir, lcpath; 
   // ! SED units: L_lambda; sed resolution for bc03: lr.
   string model,imf;
   string pixunits="uJy";
   
-  int sourceID=std::atoi(argv[1]);
   float blD, blD2;
   string snappl;
   double zsim;
@@ -119,12 +121,11 @@ int main(int argc, char** argv){
   
   readParameters(&boxl,&zs,
 		 &filfilters,&filredshiftlist,&filsnaplist,&filtimelist,&idc,
-		 &pathsnap,&bc03dir,&rdir,
+		 &pathsnap,&lcpath,&bc03dir,&agedir,&rdir,
 		 &model,&imf);
 
   
   // planes list created by lc module
-  string fplane= "../lc/planes_list.txt";
   ifstream oplane;  
   oplane.open(fplane.c_str());
   if(oplane.is_open()){
@@ -207,8 +208,12 @@ int main(int argc, char** argv){
   std::vector <vector<long double> > fresp(Nfilters,vector<long double>(0));
   std::vector <vector<long double> > fwaves(Nfilters,vector<long double>(0));
   
+  // Extract directory path from filfilters
+  size_t lastSlash = filfilters.find_last_of("/");
+  string filterDir = filfilters.substr(0, lastSlash + 1);
+  
   for(auto N=0;N<Nfilters;N++){
-    string filterin="../files/filters/" + nfilter[N] + ".dat";
+    string filterin = filterDir + "filters/" + nfilter[N] + ".dat";
     ifstream filterlist;
     filterlist.open(filterin.c_str());
     if(filterlist.is_open()){
@@ -303,7 +308,7 @@ int main(int argc, char** argv){
   
   //open age_bc03/age_cb16
   ifstream agelist;
-  string filagelist="../files/age_"+model+".txt";
+  string filagelist=agedir+"age_"+model+".txt";
   agelist.open(filagelist.c_str());
   vector <double> nage;
   vector <long double> age_bc03;

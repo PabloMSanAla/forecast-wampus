@@ -18,8 +18,8 @@
 #include <cassert>
 #include <dirent.h>
 //#include <readSUBFIND.h>
-#include "/usr/include/hdf5/serial/H5Cpp.h"
-#include </usr/include/eigen3/Eigen/Dense>
+#include "H5Cpp.h"
+#include <Eigen/Dense>
 #include "readTNGParticle.h"
 #define ARMA_DONT_USE_WRAPPER
 #include <armadillo>
@@ -77,19 +77,20 @@ int main(int argc, char** argv){
   cout << "   -               building the light-cone              - " << endl;
   cout << "   ------------------------------------------------------ " << endl;
 
-  // check if the file restart exsits ... 
-  std:: string fileplstart = std::string(argv[2])+".d";
-  int iplrestart=0;
-  std:: ifstream infileplstart;
-  infileplstart.open(fileplstart.c_str());
-  if(infileplstart.is_open()){
+  // Parse command line arguments: first is snapshot, second is plane number
+  if(argc < 3) {
     std::cout << " " << std:: endl;
-    std:: cout << " I will read the restart file >> " << fileplstart << std:: endl;
-    infileplstart >> iplrestart;
-    std:: cout << " iplrestart = " << iplrestart << std:: endl;
+    std:: cout << " Usage: " << argv[0] << " <snapshot> <plane_number>" << std:: endl;
     std:: cout << " " << std:: endl;
-    infileplstart.close();
+    exit(1);
   }
+
+  int sourceIDarg = atoi(argv[1]);  // snapshot number from first argument
+  int iplrestart = atoi(argv[2]);   // plane number from second argument
+  
+  std::cout << " " << std:: endl;
+  std:: cout << " Running with snapshot: " << sourceIDarg << " and plane: " << iplrestart << std:: endl;
+  std:: cout << " " << std:: endl;
 
   
   // ******************** to be read in the INPUT file ********************
@@ -617,6 +618,12 @@ int main(int argc, char** argv){
   
   int nsnap=iplrestart;
   
+  if(nsnap < 0 || nsnap >= blD.size()){
+    cout << " Plane number " << nsnap << " is out of range [0, " << blD.size()-1 << "]" << endl;
+    cout << " please check this out! I will STOP here!!! " << endl;
+    exit(1);
+  }
+  
   if(blD2[nsnap]-blD[nsnap] < 0){
     cout << " comoving distance of the starting point " << blD[nsnap] << endl;
     cout << " comoving distance of the final    point " << blD2[nsnap] << endl;
@@ -625,14 +632,14 @@ int main(int argc, char** argv){
   }
 
   int rcase = breplication[nsnap];
-  // get current snapshot number
-  string snappl=conv(blsnap[nsnap],fINT);       
-  int sourceID=blsnap[nsnap];
+  // get current snapshot number (from command line argument)
+  string snappl=conv(sourceIDarg,fINT);       
+  int sourceID=sourceIDarg;
  
   cout << "" << endl;
   cout << "----------------------------------------------------------------------" << endl;
   cout << " " << endl;
-  cout << "... Starting to read TNG for snapshot " << snappl << "..." << endl;
+  cout << "... Starting to read TNG for snapshot " << snappl << " (plane " << nsnap << ")..." << endl;
   cout << " " << endl;
  
   // ... masses of the different type of particles
