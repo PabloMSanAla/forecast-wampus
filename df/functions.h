@@ -22,9 +22,9 @@ vector<int>vec_sum(vector<int> &,vector<int> &);
 
 vector<double>vec_diff(vector<double>&);
 
-double getY(std:: vector<double> , std:: vector<double> ,double );
+double getY(const std::vector<double>&, const std::vector<double>&, double);
 
-template <class T> int locate(const std::vector<T> &, const T );
+template <class T> int locate(const std::vector<T>&, const T);
 
 void getPolar(double, double, double, double *, double *, double *);
 
@@ -58,8 +58,11 @@ int index_closest(std::vector<float>::iterator, std::vector<float>::iterator, fl
 
 void readParameters(double *boxl, double *zs, 
 		    string *filfilters,string *filredshiftlist,string *filsnaplist, string *filtimelist,string *idc, 
-		    string *pathsnap, string *lcpath, string *bc03dir, string *agedir, string *rdir,
-		    string *model, string *imf);
+		    string *pathsnap, string *lcpath, string *bc03dir, string *rdir,
+		    string *model, string *imf,
+		    string *planes_file,
+		    const string& custom_ini = "");
+
 
 bool allNegOne(const std::vector<float>& vec);
 
@@ -76,7 +79,7 @@ static const char ee3[] = "%4.3e";
 
 template <class T> string conv (T &val, const char *fact)
 {
-  char VAL[20]; sprintf (VAL, fact, val);
+  char VAL[32]; snprintf (VAL, sizeof(VAL), fact, val);
   return string(VAL);
 }
 
@@ -111,6 +114,6 @@ std::string getBC03MetallicityCode(int);
 
 
 ///SED
-void SEDbc03_interp_2spec(std::vector<std::vector<double> > &full_table, std::vector<double> &time_grid,  int a_indx, float ages4, std::vector<long double> &spe);
+void SEDbc03_interp_2spec(const std::vector<std::vector<double>>& full_table, const std::vector<double>& time_grid, int a_indx, float ages4, std::vector<long double>& spe);
 
-void SEDcb16_extract_spec(std::vector<std::vector<double> > &full_table, std::vector<double> &time_grid, int a_indx, float ages4, std::vector<long double> &spe);
+void SEDcb16_extract_spec(const std::vector<std::vector<double>>& full_table, const std::vector<double>& time_grid, int a_indx, float ages4, std::vector<long double>& spe);

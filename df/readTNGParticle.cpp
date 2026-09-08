@@ -6,7 +6,7 @@
 
 #include <vector>
 #include <iostream>
-#include "H5Cpp.h"
+#include <H5Cpp.h>
 #include <Eigen/Dense>
 
 #include "readTNGParticle.h"
@@ -348,7 +348,7 @@ std::vector<int> readTNGParticle::getNumPartTotal(){
   std::vector<int> n(numPartTotal.size(), 0.);
 
   for (int i = 0; i < numPartTotal.size(); i++){
-    n[i] = numPartTotal[i] | (numPartTotal_HW[i] << 32);
+    n[i] = numPartTotal[i] | (static_cast<uint64_t>(numPartTotal_HW[i]) << 32);
   }
 
   return n;

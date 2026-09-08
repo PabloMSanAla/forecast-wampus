@@ -69,7 +69,7 @@ vector<int> vec_sum(vector<int> &a,vector<int> &b){
   return summy;
 }
 
-double getY(std:: vector<double> x, std:: vector<double> y,double xi){
+double getY(const std::vector<double>& x, const std::vector<double>& y, double xi){
   int nn = x.size();
   if(x[0]<x[nn-1]){         
     if(xi>x[nn-1]) return y[nn-1];
@@ -160,8 +160,8 @@ void read_bc03_ssp(string infile, std::vector<double> &time_grid,  std::vector <
   
   std::ifstream ifile(infile.c_str());
   if (!ifile) {
-    cerr <<"Error in opening the file: "<<infile<<". EXITING now.\n\a";
-    exit(1);
+    cerr <<"Error in opening the file: "<<infile<<". EXITING now.\n";
+    exit(2);
   }
   else{
     full_table.clear();
@@ -219,8 +219,8 @@ void read_bc03_ssp(string infile, std::vector<double> &time_grid,  std::vector <
 void read_bc03_mass(std::string infile, std::vector <double> &m){
   std::ifstream ifile(infile.c_str());
   if (!ifile) {
-    cerr <<"Error in opening the file: "<<infile<<". EXITING now.\n\a";
-    exit(1);
+    cerr <<"Error in opening the file: "<<infile<<". EXITING now.\n";
+    exit(2);
   }     
   std::string line, str;  
   for (int i=0; i<29; i++)
@@ -242,7 +242,7 @@ void read_bc03_mass(std::string infile, std::vector <double> &m){
 }
 
 int index_closest(std::vector<long double>::iterator begin, std::vector<long double>::iterator end, long double value) {   
-  auto it = std::lower_bound(begin, end, value);//, std::less<long double>());  
+  auto it = std::lower_bound(begin, end, value);
   if ( it == begin )
     return 0; 
   if (it == end)
@@ -252,13 +252,13 @@ int index_closest(std::vector<long double>::iterator begin, std::vector<long dou
   if (aft < bef){
     return std::distance(begin, it);
   }  
-  else if(aft > bef){
-    return std::distance(begin,it) - 1;
+  else {
+    return std::distance(begin, it) - 1;
   }    
 }
 
 int index_closest(std::vector<double>::iterator begin, std::vector<double>::iterator end, double value) {   
-  auto it = std::lower_bound(begin, end, value);//, std::less<long double>());  
+  auto it = std::lower_bound(begin, end, value);
   if ( it == begin )
     return 0; 
   if (it == end)
@@ -268,13 +268,13 @@ int index_closest(std::vector<double>::iterator begin, std::vector<double>::iter
   if (aft < bef){
     return std::distance(begin, it);
   }  
-  else if(aft > bef){
-    return std::distance(begin,it) - 1;
+  else {
+    return std::distance(begin, it) - 1;
   }    
 }
 
 int index_closest(std::vector<float>::iterator begin, std::vector<float>::iterator end, float value) {   
-  auto it = std::lower_bound(begin, end, value);//, std::less<long double>());  
+  auto it = std::lower_bound(begin, end, value);
   if ( it == begin )
     return 0; 
   if (it == end)
@@ -284,8 +284,8 @@ int index_closest(std::vector<float>::iterator begin, std::vector<float>::iterat
   if (aft < bef){
     return std::distance(begin, it);
   }  
-  else if(aft > bef){
-    return std::distance(begin,it) - 1;
+  else {
+    return std::distance(begin, it) - 1;
   }    
 }
 
@@ -293,12 +293,29 @@ int index_closest(std::vector<float>::iterator begin, std::vector<float>::iterat
 //read .ini file parameters
 void readParameters(double *boxl, double *zs,
 		    string *filfilters, string *filredshiftlist,string *filsnaplist, string *filtimelist, string *idc, 
-		    string *pathsnap, string *lcpath, string *bc03dir, string *agedir, string *rdir,
-		    string *model, string *imf){ 
+		    string *pathsnap, string *lcpath, string *bc03dir, string *rdir,
+		    string *model, string *imf,
+		    string *planes_file,
+		    const string& custom_ini){ 
 
   string butstr;
   ifstream inputf;
-  inputf.open("df.ini");
+  if (!custom_ini.empty()) {
+    inputf.open(custom_ini.c_str());
+  }
+  if (!inputf.is_open()) {
+    const char* env_ini = std::getenv("FORECAST_DF_INI");
+    if (env_ini != nullptr && env_ini[0] != '\0') {
+      inputf.open(env_ini);
+    }
+  }
+  if (!inputf.is_open()) {
+    inputf.open("df.ini");
+  }
+  if (!inputf.is_open()) {
+    inputf.open("df/df.ini");
+  }
+
   if(inputf.is_open()){
     inputf >> butstr; // boxl
     inputf >> *boxl;
@@ -320,18 +337,45 @@ void readParameters(double *boxl, double *zs,
     inputf >> *lcpath;
     inputf >> butstr; // path where bc03 software is  located
     inputf >> *bc03dir;
-    inputf >> butstr; // path where age files are located
-    inputf >> *agedir;
     inputf >> butstr; // path where outputs are located
     inputf >> *rdir;    
     inputf >> butstr; // SED SSP model bc03 (Bruzual & Charlot 2003) or cb16 (Gutkin+16)
     inputf >> *model;
     inputf >> butstr; // IMF in bc03: ["chabrier" for chabrier] or ["salpeter" for salpeter]
     inputf >> *imf;
+    // planes_list.txt path
+    if (inputf >> butstr && inputf >> *planes_file) {
+      // successfully read planes_list_file from ini
+    } else {
+      *planes_file = "";
+    }
     inputf.close();
+
+    // Allow environment variable overrides
+    const char* env_out = std::getenv("FORECAST_OUTPUT_DIR");
+    if (env_out != nullptr && env_out[0] != '\0') {
+      *rdir = string(env_out);
+    }
+
+    const char* env_lc = std::getenv("FORECAST_LC_DIR");
+    if (env_lc != nullptr && env_lc[0] != '\0') {
+      *lcpath = string(env_lc);
+    } else {
+      const char* env_lc_out = std::getenv("FORECAST_LC_OUTPUT_DIR");
+      if (env_lc_out != nullptr && env_lc_out[0] != '\0') {
+        *lcpath = string(env_lc_out);
+      }
+    }
+
+    if (!rdir->empty() && rdir->back() != '/') {
+      *rdir += "/";
+    }
+    if (!lcpath->empty() && lcpath->back() != '/') {
+      *lcpath += "/";
+    }
   }else{
-    cout << " INPUT file does not exsit ... I will stop here!!! " << endl;
-    exit(1);
+    cerr << "Error: df.ini could not be found." << endl;
+    exit(2);
   }
 };
 
@@ -493,73 +537,84 @@ void readSSPTables(
 
 
 ///SED
-void SEDbc03_interp_2spec(std::vector <vector<double> > &full_table, std::vector<double> &time_grid,  int a_indx, float ages4,  std::vector<long double> &spe){
+void SEDbc03_interp_2spec(const std::vector<std::vector<double>>& full_table, const std::vector<double>& time_grid, int a_indx, float ages4, std::vector<long double>& spe){
 
   //Interpolating between two spectra of contiguous ages.
   double ergsa = 3.9e+33;
-  double t_1,t_2,a_1,a_2;
-  vector<double>f_1,f_2;
+  spe.clear();
 
   if(ages4<=0.){
+    spe.reserve(1221);
+    const auto& f0 = full_table[0];
     for (int i=0; i<1221; i++){
-      spe.push_back(full_table[0][i]*ergsa);
+      spe.push_back(f0[i]*ergsa);
     }
   }
-  
-
   else if(ages4>=20.){
+    spe.reserve(1221);
+    const auto& f220 = full_table[220];
     for (int i=0; i<1221; i++){
-      spe.push_back(full_table[220][i]*ergsa);
+      spe.push_back(f220[i]*ergsa);
     }
   }
-  
-  
-  else if (ages4>0. & ages4<20.){
-    if ((ages4<=time_grid[a_indx]) & (ages4>time_grid[a_indx-1])){
+  else if (ages4>0. && ages4<20.){
+    double t_1 = 0.0, t_2 = 0.0, a_1 = 0.0, a_2 = 0.0;
+    const std::vector<double>* p_f1 = nullptr;
+    const std::vector<double>* p_f2 = nullptr;
+
+    if ((ages4<=time_grid[a_indx]) && (ages4>time_grid[a_indx-1])){
       t_1 = time_grid[a_indx];
       t_2 = time_grid[a_indx-1];
       a_1 = (ages4-t_2)/(t_1-t_2);
-      a_2 = 1-a_1;
-      f_1 = full_table[a_indx];
-      f_2 = full_table[a_indx-1];
+      a_2 = 1.0-a_1;
+      p_f1 = &full_table[a_indx];
+      p_f2 = &full_table[a_indx-1];
     }
-    else if ((ages4<time_grid[a_indx+1]) & (ages4>=time_grid[a_indx])){
+    else if ((ages4<time_grid[a_indx+1]) && (ages4>=time_grid[a_indx])){
       t_1 = time_grid[a_indx+1];
       t_2 = time_grid[a_indx];
       a_1 = (ages4-t_2)/(t_1-t_2);
-      a_2 = 1-a_1;
-      f_1 = full_table[a_indx+1];
-      f_2 = full_table[a_indx];
+      a_2 = 1.0-a_1;
+      p_f1 = &full_table[a_indx+1];
+      p_f2 = &full_table[a_indx];
     }
     
-    for (int i=0; i<1221; i++){
-      spe.push_back((a_1*f_1[i]*ergsa) + (a_2*f_2[i]*ergsa));
+    spe.reserve(1221);
+    if (p_f1 && p_f2) {
+      const auto& f_1 = *p_f1;
+      const auto& f_2 = *p_f2;
+      for (int i=0; i<1221; i++){
+        spe.push_back((a_1*f_1[i]*ergsa) + (a_2*f_2[i]*ergsa));
+      }
     }
   }
-  
 }
 
-
-
-
-void SEDcb16_extract_spec(std::vector <vector<double> > &full_table, std::vector<double> &time_grid, int a_indx, float ages4, std::vector<long double> &spe){
+void SEDcb16_extract_spec(const std::vector<std::vector<double>>& full_table, const std::vector<double>& time_grid, int a_indx, float ages4, std::vector<long double>& spe){
   
 //Interpolating between two spectra of contiguous ages not needed with lines
 
   double ergsa = 3.9e+33;
+  spe.clear();
   
   if(ages4<=0.){
+    spe.reserve(13391);
+    const auto& f0 = full_table[0];
     for (int i=0; i<13391; i++){
-      spe.push_back(full_table[0][i]*ergsa);
+      spe.push_back(f0[i]*ergsa);
     }
   } else if(ages4>=20.){
+    spe.reserve(13391);
+    const auto& f220 = full_table[220];
     for (int i=0; i<13391; i++){
-      spe.push_back(full_table[220][i]*ergsa);
+      spe.push_back(f220[i]*ergsa);
     }
   }
-  else if (ages4>0. & ages4<20.){
+  else if (ages4>0. && ages4<20.){
+    spe.reserve(13391);
+    const auto& fa = full_table[a_indx];
     for (int i=0; i<13391; i++){
-      spe.push_back(full_table[a_indx][i]*ergsa);
+      spe.push_back(fa[i]*ergsa);
     }
   }
 }
