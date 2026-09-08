@@ -18,11 +18,14 @@ Options:
   -lc: Path to the planes_list.txt file (default: from lc.ini or planes_list.txt)
   -ini: Path to the lc.ini file (default: lc.ini)
   -m, --mem: Memory ceiling in GB (default: 4.0)
+  -j, --joblog: Path to file where GNU parallel logs job run statistics (e.g. parallel_lc.log)
+  -r, --results: Directory path where stdout/stderr of each job is stored
   -f, --force: Force recomputation even if output file already exists
   -h, --help: Show this help message and exit
 
 Example usage:
   ./lc.sh -n 4 -i 0
+  ./lc.sh -n 4 -i 0 -j lc_jobs.log -r lc_logs/
   ./lc.sh -n 4 -i 10 -m 8.0 -f
   ./lc.sh -n 2 -ini /path/to/custom_lc.ini
 
@@ -36,6 +39,8 @@ ini_file="lc.ini"
 memory_ceiling_gb=4.0
 output_dir=""
 force_run=false
+joblog_file=""
+results_dir=""
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -64,6 +69,14 @@ while [[ $# -gt 0 ]]; do
             memory_ceiling_gb="$2"
             shift 2
             ;;
+        -j|--joblog)
+            joblog_file="$2"
+            shift 2
+            ;;
+        -r|--results)
+            results_dir="$2"
+            shift 2
+            ;;
         -f|--force)
             force_run=true
             shift
@@ -74,6 +87,7 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
 
 # Check if GNU parallel is installed
 if ! command -v parallel &> /dev/null; then
@@ -144,8 +158,20 @@ echo "  Ini file:    $ini_file"
 echo "  Processors:  $num_processors"
 echo "  Plane range: $init_plane to $max_planes"
 echo "  Memory limit:$memory_ceiling_gb GB"
+[ -n "$joblog_file" ] && echo "  Job log:     $joblog_file"
+[ -n "$results_dir" ] && echo "  Results dir: $results_dir"
 echo "  Force rerun: $force_run"
 echo ""
+
+# Assemble extra GNU parallel arguments
+parallel_args=()
+if [ -n "$joblog_file" ]; then
+    parallel_args+=(--joblog "$joblog_file")
+fi
+if [ -n "$results_dir" ]; then
+    mkdir -p "$results_dir"
+    parallel_args+=(--results "$results_dir")
+fi
 
 # Function to run executable_lc with existence check
 run_lc() {
@@ -185,5 +211,6 @@ do
     then
         echo "${snaps[$i]} ${planes[$i]} ${output_dir} ${force_run} ${ini_file} ${memory_ceiling_gb}"
     fi        
-done | parallel --bar --jobs "$num_processors" --colsep ' ' run_lc {1} {2} {3} {4} {5} {6}
+done | parallel --bar --jobs "$num_processors" "${parallel_args[@]}" --colsep ' ' run_lc {1} {2} {3} {4} {5} {6}
+
 

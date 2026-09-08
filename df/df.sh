@@ -18,11 +18,14 @@ Options:
   -i: Initial plane number (default: 0)
   -lc: Path to the planes_list.txt file (default: from df.ini or ../lc/planes_list.txt)
   -ini: Path to the df.ini file (default: df.ini)
+  -j, --joblog: Path to file where GNU parallel logs job run statistics (e.g. parallel_df.log)
+  -r, --results: Directory path where stdout/stderr of each job is stored
   -f, --force: Force recomputation even if output file already exists
   -h, --help: Show this help message and exit
 
 Example usage:
   ./df.sh -n 4 -i 36
+  ./df.sh -n 4 -i 0 -j df_jobs.log -r df_logs/
   ./df.sh -n 4 -i 0 -f
 
 EOF
@@ -34,6 +37,8 @@ planes_list_path=""
 ini_file="df.ini"
 output_dir=""
 force_run=false
+joblog_file=""
+results_dir=""
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -58,6 +63,14 @@ while [[ $# -gt 0 ]]; do
             ini_file="$2"
             shift 2
             ;;
+        -j|--joblog)
+            joblog_file="$2"
+            shift 2
+            ;;
+        -r|--results)
+            results_dir="$2"
+            shift 2
+            ;;
         -f|--force)
             force_run=true
             shift
@@ -68,6 +81,7 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done    
+
 
 # Check if GNU parallel is installed
 if ! command -v parallel &> /dev/null; then
@@ -134,10 +148,23 @@ max_planes=$(printf "%s\n" "${planes[@]}" | sort -nr | head -n 1)
 echo "Configuration:"
 echo "  Planes list: $planes_list_path"
 echo "  Output dir:  $output_dir"
+echo "  Ini file:    $ini_file"
 echo "  Processors:  $num_processors"
 echo "  Plane range: $init_plane to $max_planes"
+[ -n "$joblog_file" ] && echo "  Job log:     $joblog_file"
+[ -n "$results_dir" ] && echo "  Results dir: $results_dir"
 echo "  Force rerun: $force_run"
 echo ""
+
+# Assemble extra GNU parallel arguments
+parallel_args=()
+if [ -n "$joblog_file" ]; then
+    parallel_args+=(--joblog "$joblog_file")
+fi
+if [ -n "$results_dir" ]; then
+    mkdir -p "$results_dir"
+    parallel_args+=(--results "$results_dir")
+fi
 
 # Function to run executable_df with existence check
 run_df() {
@@ -176,5 +203,6 @@ do
     then
         echo "${snaps[$i]} ${planes[$i]} ${output_dir} ${force_run} ${ini_file}"
     fi        
-done | parallel --bar --jobs "$num_processors" --colsep ' ' run_df {1} {2} {3} {4} {5}
+done | parallel --bar --jobs "$num_processors" "${parallel_args[@]}" --colsep ' ' run_df {1} {2} {3} {4} {5}
+
 
