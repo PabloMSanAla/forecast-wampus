@@ -13,46 +13,38 @@
 #include <stdio.h>     
 #include <stdlib.h>     
 #include <ctime>
-#include <bits/stdc++.h> 
+#include <bits/stdc++.h>
 #include <typeinfo>
 #include <cassert>
 #include <dirent.h>
-//#include <readSUBFIND.h>
-#include "H5Cpp.h"
+#include <sys/resource.h>
+#include <unordered_map>
+#if defined(__APPLE__) && defined(__MACH__)
+#include <mach/mach.h>
+#endif
+#include <H5Cpp.h>
 #include <Eigen/Dense>
 #include "readTNGParticle.h"
 #define ARMA_DONT_USE_WRAPPER
 #include <armadillo>
 #include "functions.h"
 
-/*****************************************************************************/
-/*                                                                           */
-/*             FORECAST - lightcone construction module                      */
-/*                                                                           */
-/*  original dark matter-only code by cgiocoli@gmail.com                     */
-/*  updated to its final form by flaminia.fortuni@inaf.it                    */
-/*  if you use it or do any mods, please cite Fortuni et al. (2023).         */
-/*                                                                           */
-/*                                                                           */  
-/*  this is the first module of the FORECAST code;                           */
-/*  it builds the structure of the lightcone and arrange particles in fov.   */
-/*  it runs on one snapshot per time.                                        */
-/*  - input: snapshot files; groups catalogs (if needed for subhalo IDs)     */
-/*  - output: particle in fov catalog needed for next module                 */
-/*                                                                           */
-/*                                                                           */
-/*  for a comprehensive guide, visit                                         */
-/*                          https://github.com/flaminiafortuni/FORECAST      */
-/*  for a full description of the software                                   */     
-/*       https://ui.adsabs.harvard.edu/abs/2023arXiv230519166F/abstract      */
-/*                                                                           */
-/*                                                                           */           
-/*****************************************************************************/
+/*****************************************************************************
+ *                                                                           
+ *             FORECAST - lightcone construction module                      
+ *                                                                           
+ *  original dark matter-only code by cgiocoli@gmail.com                     
+ *  updated to its final form by flaminia.fortuni@inaf.it 
+ *  Updates by Pablo M. Sanchez Alarcon - NASA Ames: 
+ *  - 8/09/26: 
+ *      Make RAM aware, add memory ceiling option, 
+ *      optimize single threaded, and improve error handling.
+ *                                                                           
+*****************************************************************************/
 
 using namespace std;
 using namespace arma;
 using namespace std::chrono; 
-
 
 const int bleft = 24;
 const double speedcunit = 2.99792458e+3;
@@ -60,13 +52,43 @@ const double speedcunitas = 2.9979e+18; //AA/s
 const double ergsa = 3.839e+33;
 const double mpM = 8.4089382e-58; //proton mass in Msun
 const double mpg = 1.6726219e-24; //proton mass in g
-
 const double h0 = 0.6774;
 
+// Darwin-aware RSS monitoring: returns peak RSS in MB
+double getPeakRSS_MB() {
+  struct rusage usage;
+  getrusage(RUSAGE_SELF, &usage);
+#if defined(__APPLE__) && defined(__MACH__)
+  // macOS returns ru_maxrss in bytes
+  return (double)usage.ru_maxrss / (1024.0 * 1024.0);
+#else
+  // Linux returns ru_maxrss in kilobytes
+  return (double)usage.ru_maxrss / 1024.0;
+#endif
+}
 
+inline void checkMemoryCeiling(double ceiling_gb) {
+  double current_peak_mb = getPeakRSS_MB();
+  double ceiling_mb = ceiling_gb * 1024.0;
+  if (current_peak_mb > ceiling_mb) {
+    cerr << "Error: Memory ceiling exceeded! Peak RSS: " << current_peak_mb
+         << " MB > Limit: " << ceiling_mb << " MB (" << ceiling_gb << " GB)" << endl;
+    exit(3);
+  }
+}
 
-int main(int argc, char** argv){
-  
+struct PlaneEntry {
+  int npl;
+  double zpl;
+  double blDpl;
+  double blD2pl;
+  int reppl;
+  int blsnappl;
+  double zpltrue;
+};
+
+int main(int argc, char** argv) {
+  H5::Exception::dontPrint();
   auto start = high_resolution_clock::now();
   cout << "----------------------------------------------------------------------" << endl;
   cout << " " << endl; 
@@ -77,246 +99,276 @@ int main(int argc, char** argv){
   cout << "   -               building the light-cone              - " << endl;
   cout << "   ------------------------------------------------------ " << endl;
 
-  // Parse command line arguments: first is snapshot, second is plane number
-  if(argc < 3) {
-    std::cout << " " << std:: endl;
-    std:: cout << " Usage: " << argv[0] << " <snapshot> <plane_number>" << std:: endl;
-    std:: cout << " " << std:: endl;
+  // 1. CLI Parsing & Validation
+  int target_snap = -1;
+  int target_plane = -1;
+  double memory_ceiling_gb = 4.0; // Default 4GB
+  string custom_ini = "";
+  vector<string> positional_args;
+
+  for (int i = 1; i < argc; i++) {
+    string arg = argv[i];
+    if (arg == "-ini") {
+      if (i + 1 < argc) {
+        custom_ini = argv[++i];
+      } else {
+        cerr << "Error: -ini option requires a file path." << endl;
+        exit(1);
+      }
+    } else if (arg == "-h" || arg == "--help") {
+      cout << "Usage: " << argv[0] << " <snapshot> <plane_number> [memory_ceiling_gb] [-ini <lc.ini>]" << endl;
+      exit(0);
+    } else {
+      positional_args.push_back(arg);
+    }
+  }
+
+  if (positional_args.size() < 2 || positional_args.size() > 3) {
+    cerr << "Usage: " << argv[0] << " <snapshot> <plane_number> [memory_ceiling_gb] [-ini <lc.ini>]" << endl;
     exit(1);
   }
 
-  int sourceIDarg = atoi(argv[1]);  // snapshot number from first argument
-  int iplrestart = atoi(argv[2]);   // plane number from second argument
-  
-  std::cout << " " << std:: endl;
-  std:: cout << " Running with snapshot: " << sourceIDarg << " and plane: " << iplrestart << std:: endl;
-  std:: cout << " " << std:: endl;
+  try {
+    target_snap = std::stoi(positional_args[0]);
+    target_plane = std::stoi(positional_args[1]);
+  } catch (...) {
+    cerr << "Error: Both snapshot and plane number must be valid integers." << endl;
+    exit(1);
+  }
 
-  
-  // ******************** to be read in the INPUT file ********************
-  // ... simulation box_length in [Mpc/h], highest redshift & distance reached by the cone, dimension of fov in degrees, resolution of the image in arcsecs
-  double boxl,zs,Ds,fov,res;
-  // ... files
-  string filredshiftlist,filsnaplist, filtimelist, filfilters,idc;
-  // ... paths
+  if (target_snap < 0 || target_plane < 0) {
+    cerr << "Error: Snapshot and plane number must be non-negative integers." << endl;
+    exit(1);
+  }
+
+  if (positional_args.size() == 3) {
+    try {
+      memory_ceiling_gb = std::stod(positional_args[2]);
+      if (memory_ceiling_gb <= 0.0) {
+        cerr << "Error: Memory ceiling must be a positive number." << endl;
+        exit(1);
+      }
+    } catch (...) {
+      cerr << "Error: Memory ceiling must be a valid number." << endl;
+      exit(1);
+    }
+  }
+
+  cout << "Requested snapshot: " << target_snap 
+       << ", plane: " << target_plane 
+       << ", memory ceiling: " << memory_ceiling_gb << " GB";
+  if (!custom_ini.empty()) {
+    cout << ", ini file: " << custom_ini;
+  }
+  cout << endl;
+
+  // Check initial memory against ceiling
+  checkMemoryCeiling(memory_ceiling_gb);
+
+  // 2. Read Input Configuration (lc.ini)
+  double boxl, zs, Ds, fov, res;
+  string filredshiftlist, filsnaplist, filtimelist, idc;
   string pathsnap, rdir;
-  // ... seeds for randomization of the simulation box
   long seedcenter, seedface, seedsign;
-  // ... sim
   string sim;
+  string planes_file_ini;
 
-  readParameters(&boxl,&zs,&fov,&res,
-		 &filredshiftlist,&filsnaplist,&filtimelist,&idc,
-		 &pathsnap,&rdir,
-		 &seedcenter,&seedface,&seedsign,&sim);
+  readParameters(&boxl, &zs, &fov, &res,
+                 &filredshiftlist, &filsnaplist, &filtimelist, &idc,
+                 &pathsnap, &rdir,
+                 &seedcenter, &seedface, &seedsign, &sim,
+                 &planes_file_ini,
+                 custom_ini);
 
-  
-  //pixels of the image
-  int truenpix=int(fov*3600/res);
-  int bufferpix=int(ceil((truenpix + 1)*20 / 14142));  // add bufferpix/2 in each side!
-  int npix=truenpix+bufferpix;
+
+  int truenpix = int(fov * 3600.0 / res);
+  int bufferpix = int(ceil((truenpix + 1) * 20 / 14142));
+  int npix = truenpix + bufferpix;
 
   cout << "N. pixels: " << truenpix << "; buffer pixels: " << bufferpix << endl;
   cout << endl;
-  
-  
-  // ... read the redshift list and the snap_available in redshift_list
-  ifstream redlist;
-  redlist.open(filredshiftlist.c_str());
-  vector <int> tsnaplist;
-  vector <double> dtsnaplist;
-  vector <double> tredlist;
-  int nmax = 1024;
-  vector<double> snapToRedshift(nmax); // no way to have more than 1024 snaphosts
-  for(int i=0;i<nmax;i++){
-    snapToRedshift[i] = -1;
+
+  // 3. Resolve and Validate planes_list.txt (from ini file)
+  string planes_file = "";
+  const char* env_planes = std::getenv("FORECAST_PLANES_LIST");
+  if (env_planes != nullptr && env_planes[0] != '\0') {
+    planes_file = env_planes;
+  } else if (!planes_file_ini.empty()) {
+    planes_file = planes_file_ini;
   }
-  if(redlist.is_open()){
-    int buta;
-    double butb,butc;
-    while(redlist >> buta >> butb >> butc){
-      tsnaplist.push_back(buta);
-      tredlist.push_back(butc);
-      dtsnaplist.push_back(buta);
-      if(buta>nmax){
-	cout << " check nmax variable and increase it! " << endl;
-	cout << " for now I will STOP here!!! " << endl;
-	exit(1);
-      }
-      snapToRedshift[buta] = butc;
+  ifstream infile_planes;
+  if (!planes_file.empty()) {
+    infile_planes.open(planes_file);
+  }
+  if (!infile_planes.is_open()) {
+    cerr << "Error: planes_list.txt could not be found. Please set PLANES_LIST_FILE in lc.ini or FORECAST_PLANES_LIST env var." << endl;
+    exit(2);
+  }
+
+  vector<PlaneEntry> all_planes;
+  int matched_plane_idx = -1;
+  int npl_in, reppl_in, blsnappl_in;
+  double zpl_in, blDpl_in, blD2pl_in, zpltrue_in;
+
+  while (infile_planes >> npl_in >> zpl_in >> blDpl_in >> blD2pl_in >> reppl_in >> blsnappl_in >> zpltrue_in) {
+    PlaneEntry pe{npl_in, zpl_in, blDpl_in, blD2pl_in, reppl_in, blsnappl_in, zpltrue_in};
+    int current_idx = (int)all_planes.size();
+    if (blsnappl_in == target_snap && (reppl_in == target_plane || npl_in - 1 == target_plane)) {
+      matched_plane_idx = current_idx;
     }
-    redlist.close();
-  }else{   
-    cout << " redshift list file " << filredshiftlist << " does not " << endl;
-    cout << " exist in the Code dir ... check this out      " << endl;
-    cout << "    I will STOP here !!! " << endl;
+    all_planes.push_back(pe);
+  }
+  infile_planes.close();
+
+  if (matched_plane_idx == -1) {
+    cerr << "Error: Snapshot " << target_snap << " and plane " << target_plane 
+         << " do not match any entry in " << planes_file << "." << endl;
     exit(1);
   }
 
-  
-  // open and read timelist 
-  ifstream timelist;
-  timelist.open(filtimelist.c_str());
-  vector <int> snap_tlist;
-  vector <double> z_tlist;
-  vector <double> age_tlist;
-  if(timelist.is_open()){
+  const PlaneEntry& selected_plane = all_planes[matched_plane_idx];
+  int nsnap = matched_plane_idx;
+  int rcase = selected_plane.reppl;
+  int sourceID = selected_plane.blsnappl;
+  string snappl = std::to_string(sourceID);
+  double blD_nsnap = selected_plane.blDpl;
+  double blD2_nsnap = selected_plane.blD2pl;
+
+  cout << "Matched Plane: Row " << selected_plane.npl 
+       << ", Replica " << selected_plane.reppl 
+       << ", Snapshot " << sourceID 
+       << ", Near: " << blD_nsnap << " cMpc/h, Far: " << blD2_nsnap << " cMpc/h" << endl;
+
+  // 4. Load Simulation Lookups & Cosmology Tables
+  ifstream redlist(filredshiftlist.c_str());
+  vector<int> tsnaplist;
+  vector<double> dtsnaplist;
+  vector<double> tredlist;
+  int nmax = 1024;
+  vector<double> snapToRedshift(nmax, -1.0);
+  if (redlist.is_open()) {
     int buta;
-    double butb,butc;
-    while(timelist >> buta >> butb >> butc){
-      snap_tlist.push_back(buta);
+    double butb, butc;
+    while (redlist >> buta >> butb >> butc) {
+      tsnaplist.push_back(buta);
+      tredlist.push_back(butc);
+      dtsnaplist.push_back(buta);
+      if (buta < nmax) snapToRedshift[buta] = butc;
+    }
+    redlist.close();
+  } else {
+    cerr << "Error: redshift list file " << filredshiftlist << " does not exist." << endl;
+    exit(2);
+  }
+
+  ifstream timelist(filtimelist.c_str());
+  vector<double> z_tlist;
+  vector<double> age_tlist;
+  if (timelist.is_open()) {
+    int buta;
+    double butb, butc;
+    while (timelist >> buta >> butb >> butc) {
       z_tlist.push_back(butb);
       age_tlist.push_back(butc);
     }
     timelist.close();
-  }
-  		 
-  else{
-    cout << " time list file " << filtimelist << "  does not " << endl;
-    cout << " exist in the Code dir ... check this out      " << endl;
-    cout << "    I will STOP here !!! " << endl;
-    exit(1);
+  } else {
+    cerr << "Error: time list file " << filtimelist << " does not exist." << endl;
+    exit(2);
   }
 
-  // open and read snaplist
-  ifstream snaplist;
-  snaplist.open(filsnaplist.c_str());
-  vector<int> vsnaps;
-  vector <int> lsnap;
+  ifstream snaplist(filsnaplist.c_str());
+  vector<int> lsnap;
   vector<double> lred;
-  vector<double> lD;
-  if(snaplist.is_open()){
+  if (snaplist.is_open()) {
     int s;
-    double zn;
-    int check=0;
-    while(snaplist >> s){
-      zn = getY(dtsnaplist,tredlist,double(s));
-      vsnaps.push_back(s);
-      if(zn>zs) check=1;
-      if(check==0){
-	lsnap.push_back(s);
-	lred.push_back(zn);
+    while (snaplist >> s) {
+      double zn = getY(dtsnaplist, tredlist, double(s));
+      if (zn <= zs) {
+        lsnap.push_back(s);
+        lred.push_back(zn);
       }
     }
     snaplist.close();
-  }else{
-    cout << filsnaplist << " does not exist in the code dir " << endl;
-    cout << "   I will STOP here!!! " << endl;
-    exit(1);
+  } else {
+    cerr << "Error: snaplist file " << filsnaplist << " does not exist." << endl;
+    exit(2);
   }
-  
-  int nsnaps = lsnap.size();
 
-  cout << "  " << endl;
-  cout << " Opening path for snapshots >>  " << pathsnap << endl;
-  cout << " " << endl;
-  cout << " I will look for comoving distance file >>  " << idc << endl;
-  cout << " " << endl;
-  
-  //open and read LCDM-comovingdistance - this file is created with astropy 
-  ifstream infiledc;
-  vector<double> zl, dl, dlum;  
-  infiledc.open(idc.c_str());
-  if(infiledc.is_open()){
-    double zi,dci,dli;
-    while(infiledc >> zi >> dci >> dli){
-      zl.push_back(zi);
-      dl.push_back(dci*speedcunit); //comoving Mpc/h. dl is a comoving distance, not a luminosity distance!
-      dlum.push_back(dli*speedcunit);//comoving Mpc/h. Luminosity distance.
-    }
-    infiledc.close();
-  }
-  else{
-    cout << "  " << endl;
-    cout << " the comoving distance file: " << idc << endl;
-    cout << " does not exists " << endl;
-    cout << " I will STOP here!!! " << endl;
-    exit(1);
-  }
-  
-  if(zs>zl[zl.size()-1]){
-    cout << " source redshift larger than the highest available redshift in the comoving distance file " << endl;
-    cout << "  that is = " << zl[zl.size()-1] << endl;
-    cout << " I will STOP here !!! " << endl;
-    exit(1);
-  }
-  
-  Ds = getY(zl,dl,zs);  // comoving distance of the last plane;
-  int nreplications = int(Ds/boxl)+1;
-  
-  cout << " nreplications = " << nreplications << ";   Ds (cMpc/h) = " << Ds << "  " << std:: endl;
-  vector<int> replication;
-  vector<int> fromsnap;
-  vector<double> lD2;
+  cout << "Opening path for snapshots >> " << pathsnap << endl;
+  cout << "Looking for comoving distance file >> " << idc << endl;
 
-  
-  for(int j=0;j<nreplications;j++){
-    for(int i=0;i<nsnaps;i++){
-      double ldbut = getY(zl,dl,lred[i]);
-      if(ldbut>=j*boxl && ldbut<=(j+1.)*boxl){
-	replication.push_back(j);
-	fromsnap.push_back(lsnap[i]);
-	lD.push_back(ldbut); //Mpc/h
+  ifstream infiledc(idc.c_str());
+  if (!infiledc.is_open()) {
+    cerr << "Error: comoving distance file " << idc << " does not exist. Please check PATH_AND_FILE_NAME_OF_COMOVING_DISTANCES in lc.ini." << endl;
+    exit(2);
+  }
+  vector<double> zl, dl, dlum;
+  double zi, dci, dli;
+  while (infiledc >> zi >> dci >> dli) {
+    zl.push_back(zi);
+    dl.push_back(dci * speedcunit);
+    dlum.push_back(dli * speedcunit);
+  }
+  infiledc.close();
+
+  if (zs > zl.back()) {
+    cerr << "Error: source redshift larger than comoving distance file maximum." << endl;
+    exit(1);
+  }
+
+  Ds = getY(zl, dl, zs);
+
+  // Compute exact in-memory cosmology plane tables for full double precision
+  int nsnaps_init = lsnap.size();
+  int nreplications = int(Ds / boxl) + 1;
+
+  vector<int> replication, fromsnap;
+  vector<double> lD, lD2;
+
+  for (int j = 0; j < nreplications; j++) {
+    for (int i = 0; i < nsnaps_init; i++) {
+      double ldbut = getY(zl, dl, lred[i]);
+      if (ldbut >= j * boxl && ldbut <= (j + 1.) * boxl) {
+        replication.push_back(j);
+        fromsnap.push_back(lsnap[i]);
+        lD.push_back(ldbut);
       }
     }
   }
-  cout << " " << endl;
-  cout << "  " << endl;
-  cout << " ... reorganazing the planes ... " << std:: endl;
-  cout << " " << endl;
-  
 
-  // creating the lightcone
-  for(int i=0;i<lD.size();i++){
-    if(i<(lD.size()-1)) lD2.push_back(lD[i+1]);
+  for (size_t i = 0; i < lD.size(); i++) {
+    if (i < (lD.size() - 1)) lD2.push_back(lD[i + 1]);
     else lD2.push_back(Ds);
   }
-  for(int i=0;i<lD.size();i++){
-    for(int k=1;k<=512;k++){
-      if(lD[i]<double(k)*boxl && lD2[i]>double(k)*boxl){
-	lD[i+1] = lD2[i]; 
-	lD2[i]=double(k)*boxl;
-      }
-    }
-    if(lD[i]<513*boxl && lD2[i]>513*boxl){
-      cout << " exiting ... increase the number of replications by hand in the file it is now 512 !!!! " << endl;
-      exit(1);
-    }
-  } 
-  
-  std:: cout << "  " << endl;
-  vector<double> zsimlens(nsnaps);
-  cout << " N_snaphot (including replications) = " << nsnaps << endl;
-  cout << " " << endl;
-  
+  // To safely allow lD[i+1] assignment when i+1 == lD.size()
+  lD.push_back(Ds);
 
-  for(int i=0;i<nsnaps;i++){
-    if(i<nsnaps-1){
-      if(lD[i+1]-lD2[i]>boxl*1e-9){
-	fromsnap[i] = -fromsnap[i];
+  for (size_t i = 0; i < lD2.size(); i++) {
+    for (int k = 1; k <= 512; k++) {
+      if (lD[i] < double(k) * boxl && lD2[i] > double(k) * boxl) {
+        lD[i + 1] = lD2[i];
+        lD2[i] = double(k) * boxl;
       }
     }
-    double dlbut = (lD[i] + lD2[i])*0.5;    
-    // half distance between the two!
-    zsimlens[i] = getY(dl,zl,dlbut);
   }
-  
-  vector<double> bfromsnap,blD,blD2,bzsimlens,blred;
-  vector<int> breplication, blsnap;
+  lD.pop_back();
 
-  vector<double> bbfromsnap,bblD,bblD2,bbzsimlens,bblred;
-  vector<int> bbreplication, bblsnap;
+  vector<double> zsimlens(nsnaps_init);
+  for (int i = 0; i < nsnaps_init; i++) {
+    if (i < nsnaps_init - 1) {
+      if (lD[i + 1] - lD2[i] > boxl * 1e-9) {
+        fromsnap[i] = -fromsnap[i];
+      }
+    }
+    double dlbut = (lD[i] + lD2[i]) * 0.5;
+    zsimlens[i] = getY(dl, zl, dlbut);
+  }
 
-  vector<double> bbbfromsnap,bbblD,bbblD2,bbbzsimlens,bbblred;
-  vector<int> bbbreplication, bbblsnap;
-  
-  vector<double> Bfromsnap,BlD,BlD2,Bzsimlens,Blred;
+  vector<double> Bfromsnap, BlD, BlD2, Bzsimlens, Blred;
   vector<int> Breplication, Blsnap;
 
-  int pl=0;
-  vector<int> pll;
-  
-  for(int i=0;i<nsnaps;i++){
+  for (int i = 0; i < nsnaps_init; i++) {
     Bfromsnap.push_back(fabs(fromsnap[i]));
     BlD.push_back(lD[i]);
     BlD2.push_back(lD2[i]);
@@ -324,93 +376,95 @@ int main(int argc, char** argv){
     Breplication.push_back(replication[i]);
     Blsnap.push_back(lsnap[i]);
     Blred.push_back(lred[i]);
-    if(fromsnap[i]<0){
+    if (fromsnap[i] < 0) {
       Bfromsnap.push_back(-fromsnap[i]);
-      BlD.push_back(lD2[i]); 
-      BlD2.push_back(lD[i+1]);
-      double dlbut = (lD[i+1] + lD2[i])*0.5;    
-      // half distance between the two!
-      Bzsimlens.push_back(getY(dl,zl,dlbut)); 
-      Breplication.push_back(replication[i+1]);
+      BlD.push_back(lD2[i]);
+      BlD2.push_back(lD[i + 1]);
+      double dlbut = (lD[i + 1] + lD2[i]) * 0.5;
+      Bzsimlens.push_back(getY(dl, zl, dlbut));
+      Breplication.push_back(replication[i + 1]);
       Blsnap.push_back(lsnap[i]);
       Blred.push_back(lred[i]);
-    }   
+    }
   }
-  cout << "  " << endl;
-  cout << " ... re-reorganazing the planes ..." << std:: endl;
-  cout << " " << endl;
-  cout << " nsnaps (including replications) = " << nsnaps << endl;
-  cout << " " << endl;
 
-   for (auto i = 0; i < Blred.size(); i++) {
+  // Add sentinel element to BlD and BlD2 to allow safe [i+1] reads
+  BlD.push_back(BlD.back());
+  BlD2.push_back(BlD2.back());
+
+  vector<double> bbfromsnap, bblD, bblD2, bbzsimlens, bblred;
+  vector<int> bbreplication, bblsnap;
+
+  for (size_t i = 0; i < Blred.size(); i++) {
     float delta = BlD2[i] - BlD[i];
-    float delta1=BlD2[i+1]-BlD[i+1];
+    float delta1 = BlD2[i + 1] - BlD[i + 1];
     int n = static_cast<int>(std::ceil(delta / boxl));
     if (delta > boxl) {
-        double add = delta / static_cast<double>(n);
-
-        for (int k = 1; k <= n; k++) {
-            bblD.push_back(BlD[i] + (k - 1) * add);
-            bblD2.push_back(BlD[i] + k * add);
-            double dlbut =BlD[i] + (2 * k - 1) * 0.5 * add;// bblD.back() + (k - 0.5) * add;
-            bbzsimlens.push_back(getY(dl, zl, dlbut));
-            bbreplication.push_back(Breplication[i - 1] + k);
-            bblsnap.push_back(Blsnap[i]);
-            bblred.push_back(Blred[i]);
-            bbfromsnap.push_back(Bfromsnap[i]);
-        }
-    } else {
-        bblD.push_back(BlD[i]);
-        bblD2.push_back(BlD[i] + delta);
-        double dlbut = BlD[i] + 0.5 * delta;  
+      double add = delta / static_cast<double>(n);
+      for (int k = 1; k <= n; k++) {
+        bblD.push_back(BlD[i] + (k - 1) * add);
+        bblD2.push_back(BlD[i] + k * add);
+        double dlbut = BlD[i] + (2 * k - 1) * 0.5 * add;
         bbzsimlens.push_back(getY(dl, zl, dlbut));
-        bbreplication.push_back(Breplication[i - 1] + 1);
+        bbreplication.push_back((i > 0 ? Breplication[i - 1] : 0) + k);
         bblsnap.push_back(Blsnap[i]);
         bblred.push_back(Blred[i]);
         bbfromsnap.push_back(Bfromsnap[i]);
-    }
-    
-    if((delta+delta1)/2.<=boxl && Bfromsnap[i]==Bfromsnap[i+1] ){ //set equal delta
-      //firts half
+      }
+    } else {
       bblD.push_back(BlD[i]);
-      bblD2.push_back((BlD[i]+BlD2[i+1])/2.);
-      double dlbut=(BlD[i]+(BlD2[i+1]+BlD[i])/2.)/2.;
-      bbzsimlens.push_back(getY(dl,zl,dlbut));
+      bblD2.push_back(BlD[i] + delta);
+      double dlbut = BlD[i] + 0.5 * delta;
+      bbzsimlens.push_back(getY(dl, zl, dlbut));
+      bbreplication.push_back((i > 0 ? Breplication[i - 1] : 0) + 1);
+      bblsnap.push_back(Blsnap[i]);
+      bblred.push_back(Blred[i]);
+      bbfromsnap.push_back(Bfromsnap[i]);
+    }
+
+    if (i + 1 < Blred.size() && (delta + delta1) / 2. <= boxl && Bfromsnap[i] == Bfromsnap[i + 1]) {
+      bblD.push_back(BlD[i]);
+      bblD2.push_back((BlD[i] + BlD2[i + 1]) / 2.);
+      double dlbut = (BlD[i] + (BlD2[i + 1] + BlD[i]) / 2.) / 2.;
+      bbzsimlens.push_back(getY(dl, zl, dlbut));
       bbreplication.push_back(Breplication[i]);
       bblsnap.push_back(Blsnap[i]);
       bblred.push_back(Blred[i]);
       bbfromsnap.push_back(Bfromsnap[i]);
-      //second half
-      bblD.push_back((BlD2[i+1]+BlD[i])/2.);
-      bblD2.push_back(BlD2[i+1]);
-      double dlbut2=(BlD2[i+1]+(BlD2[i+1]+BlD[i])/2.)/2.;
-      bbzsimlens.push_back(getY(dl,zl,dlbut2));
-      bbreplication.push_back(Breplication[i]+1);
+
+      bblD.push_back((BlD2[i + 1] + BlD[i]) / 2.);
+      bblD2.push_back(BlD2[i + 1]);
+      double dlbut2 = (BlD2[i + 1] + (BlD2[i + 1] + BlD[i]) / 2.) / 2.;
+      bbzsimlens.push_back(getY(dl, zl, dlbut2));
+      bbreplication.push_back(Breplication[i] + 1);
       bblsnap.push_back(Blsnap[i]);
       bblred.push_back(Blred[i]);
       bbfromsnap.push_back(Bfromsnap[i]);
-      i=i+1;
+      i = i + 1;
     }
-    
-    
   }
-  
-  // merge planes if they are too small
-  for (auto i=0;i<bblred.size();i++){ 
-    float delta=bblD2[i]-bblD[i];
-    float delta1=bblD2[i+1]-bblD[i+1];
-    if(delta+delta1<=boxl && bbfromsnap[i]==bbfromsnap[i+1] ){
+
+  // Sentinel for bbl
+  bblD.push_back(bblD.back());
+  bblD2.push_back(bblD2.back());
+  bbfromsnap.push_back(bbfromsnap.back());
+
+  vector<double> bbbfromsnap, bbblD, bbblD2, bbbzsimlens, bbblred;
+  vector<int> bbbreplication, bbblsnap;
+  for (size_t i = 0; i < bblred.size(); i++) {
+    float delta = bblD2[i] - bblD[i];
+    float delta1 = bblD2[i + 1] - bblD[i + 1];
+    if (i + 1 < bblred.size() && delta + delta1 <= boxl && bbfromsnap[i] == bbfromsnap[i + 1]) {
       bbbfromsnap.push_back(bbfromsnap[i]);
       bbblD.push_back(bblD[i]);
-      bbblD2.push_back(bblD2[i+1]);
-      double dlbut=(bblD[i]+bblD2[i+1])/2.;
-      bbbzsimlens.push_back(getY(dl,zl,dlbut));
-      bbbreplication.push_back(bbreplication[i]+1);
+      bbblD2.push_back(bblD2[i + 1]);
+      double dlbut = (bblD[i] + bblD2[i + 1]) / 2.;
+      bbbzsimlens.push_back(getY(dl, zl, dlbut));
+      bbbreplication.push_back(bbreplication[i] + 1);
       bbblsnap.push_back(bblsnap[i]);
       bbblred.push_back(bblred[i]);
-      i=i+1;
-    }
-    else{
+      i = i + 1;
+    } else {
       bbbfromsnap.push_back(bbfromsnap[i]);
       bbblD.push_back(bblD[i]);
       bbblD2.push_back(bblD2[i]);
@@ -420,22 +474,28 @@ int main(int argc, char** argv){
       bbblred.push_back(bblred[i]);
     }
   }
-  //again
-  for (auto i=0;i<bbblred.size();i++){ 
-    float delta=bbblD2[i]-bbblD[i];
-    float delta1=bbblD2[i+1]-bbblD[i+1];
-    if(delta+delta1<=boxl && bbbfromsnap[i]==bbbfromsnap[i+1] ){
+
+  // Sentinel for bbbl
+  bbblD.push_back(bbblD.back());
+  bbblD2.push_back(bbblD2.back());
+  bbbfromsnap.push_back(bbbfromsnap.back());
+
+  vector<double> bfromsnap, blD, blD2, bzsimlens, blred;
+  vector<int> breplication, blsnap;
+  for (size_t i = 0; i < bbblred.size(); i++) {
+    float delta = bbblD2[i] - bbblD[i];
+    float delta1 = bbblD2[i + 1] - bbblD[i + 1];
+    if (i + 1 < bbblred.size() && delta + delta1 <= boxl && bbbfromsnap[i] == bbbfromsnap[i + 1]) {
       bfromsnap.push_back(bbbfromsnap[i]);
       blD.push_back(bbblD[i]);
-      blD2.push_back(bbblD2[i+1]);
-      double dlbut=(bbblD[i]+bbblD2[i+1])/2.;
-      bzsimlens.push_back(getY(dl,zl,dlbut));
-      breplication.push_back(bbbreplication[i]+1);
+      blD2.push_back(bbblD2[i + 1]);
+      double dlbut = (bbblD[i] + bbblD2[i + 1]) / 2.;
+      bzsimlens.push_back(getY(dl, zl, dlbut));
+      breplication.push_back(bbbreplication[i] + 1);
       blsnap.push_back(bbblsnap[i]);
       blred.push_back(bbblred[i]);
       i = i + 1;
-    }
-    else{
+    } else {
       bfromsnap.push_back(bbbfromsnap[i]);
       blD.push_back(bbblD[i]);
       blD2.push_back(bbblD2[i]);
@@ -446,17 +506,12 @@ int main(int argc, char** argv){
     }
   }
 
-  //erase repeated rows
-  vector<int> er_inx(0);
-  for (auto i = 0; i < blD.size() - 1; i++) {
+  vector<int> er_inx;
+  for (size_t i = 0; i < blD.size() - 1; i++) {
     if (blD[i] == blD[i + 1] && blD2[i] != blD2[i + 1]) {
       er_inx.push_back(i);
     }
-    else if (blD[i] == blD[i + 1] && blD2[i] != blD2[i + 1]) { //INTERROTTO QUI
-      er_inx.push_back(i);
-    }
   }
-
   for (auto it = er_inx.rbegin(); it != er_inx.rend(); ++it) {
     bfromsnap.erase(bfromsnap.begin() + *it);
     blD.erase(blD.begin() + *it);
@@ -466,638 +521,388 @@ int main(int argc, char** argv){
     blsnap.erase(blsnap.begin() + *it);
     blred.erase(blred.begin() + *it);
   }
-    
-  Bfromsnap.clear();
-  Bfromsnap.shrink_to_fit();
-  BlD.clear();
-  BlD.shrink_to_fit();
-  BlD2.clear();
-  BlD2.shrink_to_fit();
-  Bzsimlens.clear();
-  Bzsimlens.shrink_to_fit();
-  Breplication.clear();
-  Breplication.shrink_to_fit();
-  Blsnap.clear();
-  Blsnap.shrink_to_fit();
-  Blred.clear();
-  Blred.shrink_to_fit();
-  
-  bbfromsnap.clear();
-  bbfromsnap.shrink_to_fit();
-  bblD.clear();
-  bblD.shrink_to_fit();
-  bblD2.clear();
-  bblD2.shrink_to_fit();
-  bbzsimlens.clear();
-  bbzsimlens.shrink_to_fit();
-  bbreplication.clear();
-  bbreplication.shrink_to_fit();
-  bblsnap.clear();
-  bblsnap.shrink_to_fit();
-  bblred.clear();
-  bblred.shrink_to_fit();
+
   breplication.clear();
-  breplication.shrink_to_fit();
-  
-
-  // creating planes_list.txt file: structure of the lighcone
-  ofstream planelist;
-  planelist.open("planes_list.txt"); 
-  nsnaps = bfromsnap.size();  
-  for(int i=0;i<nsnaps;i++){
-    breplication.push_back(i);      
-    pl++;
-    planelist <<  pl << "   " <<  bzsimlens[i] << "   " << blD[i] << "   " << blD2[i] << "   " <<  breplication[i] << "   " << bfromsnap[i] << "   " << blred[i] << std:: endl;
-    pll.push_back(pl);    
+  int nsnaps = bfromsnap.size();
+  for (int i = 0; i < nsnaps; i++) {
+    breplication.push_back(i);
   }
 
-  
-  
-  if(blD2[nsnaps-1]<Ds-1e-6){
-    // we need to add one more snaphost
-    snaplist.open(filsnaplist.c_str());
-    double s;
-    while(snaplist >> s){
-      if(s<bfromsnap[nsnaps-1]){
-	bfromsnap.push_back(s);
-	double dlbut = (Ds+blD2[nsnaps-1])*0.5;
-	double zbut = getY(dl,zl,dlbut);
-	blD.push_back(blD2[nsnaps-1]);
-	blD2.push_back(Ds);
-	bzsimlens.push_back(zbut);
-	breplication.push_back(breplication[nsnaps-1]+1);
-	double zn = getY(dtsnaplist,tredlist,double(s));
-	blsnap.push_back(s);
-	lred.push_back(zn);
-	nsnaps++;
-	snaplist.close();	
-      }
-    }
-    pl++;
-    planelist << pl << "   " << bzsimlens[nsnaps-1] << "   " << blD[nsnaps-1] << "   " << blD2[nsnaps-1] << "   " << breplication[nsnaps-1] << "   " << bfromsnap[nsnaps-1] << "   " << blred[nsnaps-1] << std:: endl;
-    pll.push_back(pl);	 
+  if (matched_plane_idx < (int)blD.size()) {
+    blD_nsnap = blD[matched_plane_idx];
+    blD2_nsnap = blD2[matched_plane_idx];
   }
-  
-  planelist.close();
 
-  std:: cout << " " << std:: endl;
-  std:: cout << " ... re-reorganazing the planes ..." << std:: endl;
-  std:: cout << " " << std:: endl;
-  std:: cout << " nsnaps (including replications) at the end = " << nsnaps << std::endl;
-  std:: cout << "  " << endl;
+  double truefov = fov;
+  double fovradiants = fov / 180.0 * M_PI;
 
-  
-  // randomizzation of the box realizations :
-  int nrandom = breplication[nsnaps-1]+1;
-  vector<double> x0(nrandom), y0(nrandom), z0(nrandom); // ramdomizing the center of the simulation [0,1]
-  vector<int> face(nrandom); // face of the dice
-  vector<int> sgnX(nrandom), sgnY(nrandom),sgnZ(nrandom);
-  
-  for(int i=0;i<nrandom;i++){
-    if(seedcenter>0){
-      srand(seedcenter+i*13);
+  if (fovradiants * Ds > boxl) {
+    cerr << "Error: field of view too large for box size." << endl;
+    exit(1);
+  }
+
+  fov = truefov * double(npix) / double(truenpix);
+  fovradiants = fov / 180.0 * M_PI;
+
+  // 5. Randomization of Box Realizations
+  int nrandom = all_planes.back().reppl + 1;
+  vector<double> x0(nrandom), y0(nrandom), z0(nrandom);
+  vector<int> face(nrandom);
+  vector<int> sgnX(nrandom), sgnY(nrandom), sgnZ(nrandom);
+
+  for (int i = 0; i < nrandom; i++) {
+    if (seedcenter > 0) {
+      srand(seedcenter + i * 13);
       x0[i] = rand() / float(RAND_MAX);
       y0[i] = rand() / float(RAND_MAX);
       z0[i] = rand() / float(RAND_MAX);
-    }else{
-      x0[i] = 0.;
-      y0[i] = 0.;
-      z0[i] = 0.;
+    } else {
+      x0[i] = 0.0;
+      y0[i] = 0.0;
+      z0[i] = 0.0;
     }
     face[i] = 7;
-    if(seedface>0){
-      srand(seedface+i*5);
-      while(face[i]>6 || face[i]<1) face[i] = int(1+rand() / float(RAND_MAX)*5.+0.5);
-    }else{
-      face[i]=1;
+    if (seedface > 0) {
+      srand(seedface + i * 5);
+      while (face[i] > 6 || face[i] < 1)
+        face[i] = int(1 + rand() / float(RAND_MAX) * 5.0 + 0.5);
+    } else {
+      face[i] = 1;
     }
     sgnX[i] = 2;
-    if(seedsign>0){
-      srand(seedsign+i*8);
-      while(sgnX[i] > 1 || sgnX[i] < 0) sgnX[i] = int(rand() / float(RAND_MAX)+0.5);
+    if (seedsign > 0) {
+      srand(seedsign + i * 8);
+      while (sgnX[i] > 1 || sgnX[i] < 0) sgnX[i] = int(rand() / float(RAND_MAX) + 0.5);
       sgnY[i] = 2;
-      while(sgnY[i] > 1 || sgnY[i] < 0) sgnY[i] = int(rand() / float(RAND_MAX)+0.5);
+      while (sgnY[i] > 1 || sgnY[i] < 0) sgnY[i] = int(rand() / float(RAND_MAX) + 0.5);
       sgnZ[i] = 2;
-      while(sgnZ[i] > 1 || sgnZ[i] < 0) sgnZ[i] = int(rand() / float(RAND_MAX)+0.5);
-      if(sgnX[i]==0) sgnX[i]=-1;
-      if(sgnY[i]==0) sgnY[i]=-1;
-      if(sgnZ[i]==0) sgnZ[i]=-1;
-    }else{
-      sgnX[i]=1;
-      sgnY[i]=1;
-      sgnZ[i]=1;
+      while (sgnZ[i] > 1 || sgnZ[i] < 0) sgnZ[i] = int(rand() / float(RAND_MAX) + 0.5);
+      if (sgnX[i] == 0) sgnX[i] = -1;
+      if (sgnY[i] == 0) sgnY[i] = -1;
+      if (sgnZ[i] == 0) sgnZ[i] = -1;
+    } else {
+      sgnX[i] = 1;
+      sgnY[i] = 1;
+      sgnZ[i] = 1;
     }
   }
-  
-  double truefov = fov;
-  std:: cout << "  " << endl;
-  cout << "  " << endl;
-  cout << " set the field of view to be square in degrees. " << endl;
-  cout << " fov's side  is " << fov << " in degrees and " << fov*3600. << " in arcsec. " << endl;
-  double fovradiants;
-  double om0, omL0;
-  fovradiants = fov/180.*M_PI;
-  double truefovradiants = fovradiants;
 
-  // check of the field of view is too large with respect to the box size
-  std:: cout << " [ maximum fov side's value allowed " << boxl/Ds*180./M_PI << " in degrees] " << std:: endl;
-  if(fovradiants*Ds>boxl){
-    std:: cout << " field view too large ... I will STOP here!!! " << std:: endl;
-    std:: cout << " value set is = " << fov << std:: endl;
-    std:: cout << " maximum value allowed " << boxl/Ds*180./M_PI << " in degrees " << std:: endl;
-    std:: cout << " Check it out ... I will STOP here!!! " << endl;
-
-    exit(1);
-  }
-  
-  //for selection of the particles
-  fov = truefov*double(npix)/double(truenpix);
-  fovradiants = fov/180.*M_PI;
-  cout << " " << endl;
-  cout << " FORECAST uses " << nsnaps << " snapshots (including replications) for this image simulations" << endl;
-  
-  int nsnap=iplrestart;
-  
-  if(nsnap < 0 || nsnap >= blD.size()){
-    cout << " Plane number " << nsnap << " is out of range [0, " << blD.size()-1 << "]" << endl;
-    cout << " please check this out! I will STOP here!!! " << endl;
-    exit(1);
-  }
-  
-  if(blD2[nsnap]-blD[nsnap] < 0){
-    cout << " comoving distance of the starting point " << blD[nsnap] << endl;
-    cout << " comoving distance of the final    point " << blD2[nsnap] << endl;
-    cout << " please check this out! I will STOP here!!! " << endl;
-    exit(1);
-  }
-
-  int rcase = breplication[nsnap];
-  // get current snapshot number (from command line argument)
-  string snappl=conv(sourceIDarg,fINT);       
-  int sourceID=sourceIDarg;
- 
-  cout << "" << endl;
+  // 6. Initialize Simulation Data & Group Catalog
+  cout << endl;
   cout << "----------------------------------------------------------------------" << endl;
-  cout << " " << endl;
-  cout << "... Starting to read TNG for snapshot " << snappl << " (plane " << nsnap << ")..." << endl;
-  cout << " " << endl;
- 
-  // ... masses of the different type of particles
-  double m0,m1,m2,m3,m4,m5;
-  // ... star particles
-  vector<int> ID4_(0), ID4(0);                                                            
-  vector<float> X4_(0), Y4_(0), Z4_(0), IM4_(0), M4_(0), Met4_(0), FTIME4_(0), ZF4_(0);             
-  vector<float> X4(0), Y4(0), Z4(0), IM4(0), M4(0), Met4(0), ZF4(0), FTIME4(0),AGE4(0);           
-  vector<float> xx4(0), yy4(0), zz4(0), zzs(0), zzred4(0), org_z(0);
-  // ... 2Dgrid stars
-  vector<int> ids(0), idSH4(0), idshs(0);
-  vector<float> xs(0),ys(0),zstar(0),zreds(0),ms4(0),ims4(0),ages4(0),dtmp(0),orgZ(0);
-  vector<long double> mets4(0);
-  vector<double> fiub(0);    
-  // ... other
-  vector<int> gcLenTypeS(0), gcOffsetsTypeS(0);
-  vector<long double> met_bc03 { 0.0001, 0.0004, 0.004, 0.008, 0.02, 0.05};
-  double zsim, dlsim;
-  double bs,time;  
-  // ... constants
-  float convm=(1.e10/h0);
- 
-  // ... readind simulation 
-  // initialize the reading particles class
-  readTNGParticle tngParticle;
-  tngParticle.Initialize(pathsnap, sourceID); 
-  
-  // read header
-  tngParticle.readHeader(0);
-  // get header info
-  bs = tngParticle.getBoxSize(); //[ckpc/h]
-  om0 = tngParticle.getOmegaZero();
-  omL0 = tngParticle.getOmegaLambda();
-  time = tngParticle.getTime();
-  zsim = tngParticle.getRedshift();
-  dlsim = getY(zl,dl,zsim); //[Mpc/h];
-  std::vector<double> mass = tngParticle.getMassTable(); //[1e10 Msun/h]
-  std::vector<int> npart = tngParticle.getNumPartTotal();
-  float bsh0=bs*1./h0; //bs (boxsize) is in kpc/h
-  float h0bs=h0*1./bs;
-  
-  // reserve space for star particles
-  X4_.reserve(npart[4]);
-  Y4_.reserve(npart[4]);
-  Z4_.reserve(npart[4]);
-  IM4_.reserve(npart[4]);
-  M4_.reserve(npart[4]);
-  Met4_.reserve(npart[4]);
-  FTIME4_.reserve(npart[4]);
-  ZF4_.reserve(npart[4]);
-  ID4_.reserve(npart[4]);
-    
-  // Count files in snapdir and groups directories
-  std::string workdir_sn = pathsnap + "/snapdir_0"+snappl+"/"; // snapshot path; each snapshot stored in its own folder
-  std::string workdir_g = pathsnap + "/groups_0"+snappl+"/"; // groups path; each group in its folder. These files need to be separated from snapshot and offset files
-  std::string workdir_os = pathsnap + "/offsets_0"+snappl+".hdf5"; // offset path - all together
-  int nf_sn=countHDF5Files(workdir_sn, "hdf5");
-  int nf_g=countHDF5Files(workdir_g, "hdf5");
-  
-  // read stellar particles (PartType4) looping through nf_sn *.hdf5 files
-  for (int i=0; i<nf_sn; i++){
-    tngParticle.readStars(i);
-    std::vector<double> metal = tngParticle.getMetallicity();
-    std::vector<double> inMass = tngParticle.getInitialMass();
-    std::vector<double> sTime = tngParticle.getStellarFormationTime();
-    std::vector<double> Mass = tngParticle.getMasses();
-    std::vector<double> X_ = tngParticle.getX();
-    std::vector<double> Y_ = tngParticle.getY();
-    std::vector<double> Z_ = tngParticle.getZ();	
-    Met4_.insert(Met4_.end(), metal.begin(), metal.end());
-    FTIME4_.insert(FTIME4_.end(), sTime.begin(), sTime.end());
-    IM4_.insert(IM4_.end(), inMass.begin(), inMass.end());
-    M4_.insert(M4_.end(), Mass.begin(), Mass.end());
-    X4_.insert(X4_.end(), X_.begin(), X_.end());
-    Y4_.insert(Y4_.end(), Y_.begin(), Y_.end());
-    Z4_.insert(Z4_.end(), Z_.begin(), Z_.end());
-  }
-   
-  // matching ids between stars and subhalos - this is specific for TNG simulation
-  for (int i=0; i<nf_g; i++){
-    tngParticle.readFof(i);
-    std::vector<int> sLTS = tngParticle.getStarsLenType();
-    gcLenTypeS.insert(gcLenTypeS.end(), sLTS.begin(), sLTS.end());
-  }  
-  tngParticle.readOffset();
-  gcOffsetsTypeS = tngParticle.getStarsByType();
-  
-  // stars: filtering out spurious particles, computing age etc - this is specific for TNG simulation
-  int datalen= Met4_.size();
-  for (int i=0; i<datalen; i++){
-    ID4_.push_back(i);
-  }
-  
-  for (int i=0; i<datalen; i++){
-    if (FTIME4_[i]>0.){
-      Met4.push_back(Met4_[i]);
-      FTIME4.push_back(FTIME4_[i]);
-      IM4.push_back(IM4_[i]*convm); //[Msun/h]
-      M4.push_back(M4_[i]*convm); //[Msun/h]
-      X4.push_back(X4_[i]); //[kpc/h]
-      Y4.push_back(Y4_[i]);
-      Z4.push_back(Z4_[i]);
-      ZF4.push_back(1./FTIME4_[i]-1.);
-      ID4.push_back(ID4_[i]);
-    }
-  }
-  idSH4 = inverseMap_sh_idv3(gcLenTypeS,gcOffsetsTypeS,ID4, true);
-      
-  cout << "TNG FULL snapshot - N particles: " <<ID4.size() << endl;
-           
-  Met4_.clear();
-  Met4_.shrink_to_fit();
-  IM4_.clear();
-  IM4_.shrink_to_fit();
-  M4_.clear();
-  M4_.shrink_to_fit();
-  X4_.clear();
-  X4_.shrink_to_fit();
-  Y4_.clear();
-  Y4_.shrink_to_fit();
-  Z4_.clear();
-  Z4_.shrink_to_fit();
-  FTIME4_.clear();
-  FTIME4_.shrink_to_fit();
-  ID4_.clear();
-  ID4_.shrink_to_fit();
+  cout << "... Starting to read TNG for snapshot " << snappl << "..." << endl;
+  cout << endl;
 
-  // compute age of the particle, knowing the formation redshift of the particle - this is specific for TNG
-  int finaldatalen=Y4.size();      
-  for (int i=0; i<finaldatalen; i++){
-    float tf=getY(z_tlist,age_tlist,ZF4[i]); // this interpolation holds true because z- Dc the spacing is thick
-    float t0=getY(z_tlist, age_tlist,zsim );
-    float tmp=0.;
-    tmp=t0-tf;
-    AGE4.push_back(tmp);
+  string check_snap_file = pathsnap + "/snapdir_0" + snappl + "/snap_0" + snappl + ".0.hdf5";
+  ifstream test_snap(check_snap_file);
+  if (!test_snap.is_open()) {
+    cerr << "Error: Missing snapshot data file: " << check_snap_file << endl;
+    exit(2);
   }
-  
-     
-  
-  // print simulation header info
-  cout << "  " << endl;
-  cout << "      __________________ COSMOLOGY __________________  " << endl;
-  cout << " " << endl;
-  cout << "      Omegam = " << om0 << "      " << "Omegal = " << omL0 << endl;
-  cout << "           h = " << h0   << "      " << "BoxSize (cMpc/h)= " << bs/(1.e+3) << endl;
-  cout << "      redshift = " << zsim <<   "   " << "Dl (cMpc/h) = " << dlsim << endl;
-  if(abs(boxl - bs/1.e+3)>1.e-2 ){
-    cout << " set boxl and data.size differ ... check it! " << std:: endl;
-    cout << "  boxl = " << boxl << "  " << " data.boxsize = " << bs/1.e+3 << endl;
-    exit(1);
-  }
-  
-  cout << "      _______________________________________________  " << endl;
-  cout << " " << endl;
-  cout << "   gas (0); dm (1); tracers (3); stars (4); bh (5)   //  (2) unused. " << endl;   
-  cout << "   total number of particles in the simulation: " << endl; 
-  cout << npart[0] << " " << npart[1]  << " " << npart[3] << " " << npart[4]
-       << " " << npart[5] <<  endl;
-  cout << " " << endl;
-  cout << "   particle type mass array: " << endl; 
-  cout << mass[0] << " " << mass[1] << " " << mass[3] 
-       << " " << mass[4] << " " <<  mass[5]  << endl;
-  cout << " " << endl;
-  
-  m0 = mass[0]; //gas, empty
-  m1 = mass[1]; //dm
-  m3 = mass[3]; //tracers
-  m4 = mass[4]; //stars, empty
-  m5 = mass[5]; //bh, empty
-  
-  cout << " " << endl;
-  cout << npart[4] << "   type (4)   - STAR particles firstly selected in the snapshot."<<endl;
-  cout << "" <<endl;
-  
+  test_snap.close();
 
-  // manipulating the coordinates in the box
-  for (int pp=0; pp<X4.size(); pp++) {
-    float x, y, z, zred, zred_int, dlz;
-    float xb, yb, zb, zr, orgz;
-    
-    xb = sgnX[rcase]*(((X4[pp])/bs));
-    yb = sgnY[rcase]*(((Y4[pp])/bs));
-    zb = sgnZ[rcase]*(((Z4[pp])/bs));
-    zr = sgnZ[rcase]*(((Z4[pp])/bs));
-    orgz=Z4[pp];
-    // wrapping periodic condition 
-    if(xb>1.) xb = xb - 1.;
-    if(yb>1.) yb = yb - 1.;
-    if(zb>1.) zb = zb - 1.;
-    if(zr>1.) zr = zr - 1.;
-    if(xb<0.) xb = 1. + xb;
-    if(yb<0.) yb = 1. + yb;
-    if(zb<0.) zb = 1. + zb;
-    if(zr<0.) zr = 1. + zr;
-    switch (face[rcase]){
-    case(1):
-      x = xb;
-      y = yb;
-      z = zb;
-      zred = zr;
-      break;
-    case(2):
-      x = xb;
-      y = zb;
-      z = yb;
-      zred = yb;
-      break;
-    case(3):
-      x = yb;
-      y = zb;
-      z = xb;
-      zred = xb;
-      break;
-    case(4):
-      x = yb;
-      y = xb;
-      z = zb;
-      zred = zr;
-      break;
-    case(5):
-      x = zb;
-      y = xb;
-      z = yb;
-      zred = yb;
-      break;
-    case(6):
-      x = zb;
-      y = yb;
-      z = xb;
-      zred = xb;
-      break;
-    }
-    // recenter
-    x = x - x0[rcase];
-    y = y - y0[rcase];
-    z = z - z0[rcase];
-    zred = zred - z0[rcase];
-    // wrapping periodic condition again
-    if(x>1.) x = x - 1.;
-    if(y>1.) y = y - 1.;
-    if(z>1.) z = z - 1.;
-    if(zred>1.) zred = zred - 1.;
-    if(x<0.) x = 1. + x;
-    if(y<0.) y = 1. + y;
-    if(z<0.) z = 1. + z;
-    if(zred<0.) zred = 1. + zred;
-    zzs.push_back(z); // z in [0,1] normalized to bs 
-    z+=double(rcase); // pile the cones double(blred[nsnap])
-    xx4.push_back(x);
-    yy4.push_back(y);
-    zz4.push_back(z); // N replica
-    org_z.push_back(orgz);
-  }
-  
-  X4.clear();
-  X4.shrink_to_fit();
-  Y4.clear();
-  Y4.shrink_to_fit();
-  Z4.clear();
-  Z4.shrink_to_fit();
-  
-  
-  
-  int n4 = xx4.size();
-  int totPartxy4;
-  
-  cout << n4 <<"   type (4) - STAR particles re-arranged in the snapshot."<<endl;
-  cout << "" << endl;
-  
-  if(n4>0){
-    // print some infos of the quadrate box
-    double xmin=double(*min_element(xx4.begin(), xx4.end()));
-    double xmax=double(*max_element(xx4.begin(), xx4.end()));  
-    double ymin=double(*min_element(yy4.begin(), yy4.end()));
-    double ymax=double(*max_element(yy4.begin(), yy4.end()));  
-    double zmin=double(*min_element(zz4.begin(), zz4.end()));
-    double zmax=double(*max_element(zz4.begin(), zz4.end()));
-    double zstarmin=double(*min_element(zzs.begin(), zzs.end()));
-    double zstarmax=double(*max_element(zzs.begin(), zzs.end()));
-    cout << " " << endl;
-    cout << " n4 particles " << endl;
-    cout << "xmin = " << xmin << endl;
-    cout << "xmax = " << xmax << endl;
-    cout << "ymin = " << ymin << endl;
-    cout << "ymax = " << ymax << endl;
-    cout << "zmin = " << zstarmin << endl;
-    cout << "zmax = " << zstarmax << endl;
-    cout << "boxmin = " << zmin << endl;
-    cout << "boxmax = " << zmax << endl;
-    cout << "  " << endl;
-    if(xmin<0 || ymin<0 || zmin< 0){
-      cout << "xmin = " << xmin << endl;
-      cout << "xmax = " << xmax << endl;
-      cout << "ymin = " << ymin << endl;
-      cout << "ymax = " << ymax << endl;
-      cout << "boxmin = " << zmin << endl;
-      cout << "boxmax = " << zmax << endl;
-      cout << "  4 type check this!!! I will STOP here!!! " << endl;
-      exit(1);
-    }
-    cout << " ... selecting only particles in fov ..." << endl;
-    cout << "" << endl;
-    
-    
-    // select particles in the field of view
-    vector<double> dtmp(0), ra(0), decl(0), xtmp(0), ytmp(0), ztmp(0), redtmp(0), infv(0);
-    for(int l=0;l<n4;l++){
-      
-      double Ztmp= (zzs[l]*(bs/1.e+3)+blD[nsnap])/(bs/1.e+3); // [Mpc/h]
-      double di = sqrt(pow(xx4[l]-0.5,2) + pow(yy4[l]-0.5,2) + pow(Ztmp,2))*bs/1.e+3; // distance between particle and observer at (.5,.5,0)*bs
-      
-      if(di>=blD[nsnap] && di<blD2[nsnap]){	    
-	double rai,deci,dd;
-	getPolar(xx4[l]-0.5,yy4[l]-0.5,Ztmp,&rai,&deci,&dd);
-	if(fabs(rai)<=fovradiants*0.5 && fabs(deci)<=fovradiants*0.5){	  
-	  double fovinunitbox = fovradiants*di/(bs/1.e+3);		
-	  ids.push_back(ID4[l]);
-	  fiub.push_back(fovinunitbox);
-	  xs.push_back((xx4[l]-0.5)/fovinunitbox+0.5);
-	  ys.push_back((yy4[l]-0.5)/fovinunitbox+0.5);
-	  zstar.push_back(zzs[l]/fovinunitbox);
-	  zreds.push_back(getY(dl,zl,Ztmp*(bs/1.e+3)));
-	  ms4.push_back((M4[l]));
-	  ims4.push_back(IM4[l]);
-	  mets4.push_back(Met4[l]);
-	  ages4.push_back(AGE4[l]);
-	  dtmp.push_back(di);		
-	  xtmp.push_back(xx4[l]*(bs/1.e+3)); //Mpc/h [0,75]
-	  ytmp.push_back(yy4[l]*(bs/1.e+3)); //Mpc/h [0,75]
-	  orgZ.push_back(org_z[l]);
-	}
-      }	    
-    }
-    
-    Met4.clear();
-    Met4.shrink_to_fit();
-    IM4.clear();
-    IM4.shrink_to_fit();
-    M4.clear();
-    M4.shrink_to_fit();
-    AGE4.clear();
-    AGE4.shrink_to_fit();
-    FTIME4.clear();
-    FTIME4.shrink_to_fit();
-    ZF4.clear();
-    ZF4.shrink_to_fit();
-    ID4.clear();
-    ID4.shrink_to_fit();
+  vector<int> gcLenTypeS;
+  vector<int> gcOffsetsTypeS;
+  vector<int> ids;
+  vector<float> xs, ys, zreds, ms4, ims4, ages4, zstar, orgZ;
+  vector<long double> mets4;
+  vector<double> fiub, xtmp, ytmp;
+  vector<int> countSH4;
+  double xmin = 1e30, xmax = -1e30;
+  double ymin = 1e30, ymax = -1e30;
+  double zmin = 1e30, zmax = -1e30;
+  double zstarmin = 1e30, zstarmax = -1e30;
+  long long n4_total = 0;
 
-    cout << " " << endl;
-    cout << " ... Coordinates & redshift limits ..." << endl;
+  try {
+    readTNGParticle tngParticle;
+    tngParticle.Initialize(pathsnap, sourceID);
+    tngParticle.readHeader(0);
+
+    double bs = tngParticle.getBoxSize();
+    double om0 = tngParticle.getOmegaZero();
+    double omL0 = tngParticle.getOmegaLambda();
+    double time = tngParticle.getTime();
+    double zsim = tngParticle.getRedshift();
+    double dlsim = getY(zl, dl, zsim);
+    vector<double> mass = tngParticle.getMassTable();
+    vector<int> npart = tngParticle.getNumPartTotal();
+
+    string workdir_sn = pathsnap + "/snapdir_0" + snappl + "/";
+    string workdir_g = pathsnap + "/groups_0" + snappl + "/";
+    int nf_sn = countHDF5Files(workdir_sn, "hdf5");
+    int nf_g = countHDF5Files(workdir_g, "hdf5");
+
+    for (int i = 0; i < nf_g; i++) {
+      tngParticle.readFof(i);
+      vector<int> sLTS = tngParticle.getStarsLenType();
+      gcLenTypeS.insert(gcLenTypeS.end(), sLTS.begin(), sLTS.end());
+    }
+    tngParticle.readOffset();
+    gcOffsetsTypeS = tngParticle.getStarsByType();
+
+    int num_sh = (int)gcLenTypeS.size();
+    vector<int> diff(num_sh);
+    vector<int> gcOffsetsMax(num_sh);
+    for (int s = 0; s < num_sh; s++) {
+      diff[s] = gcOffsetsTypeS[s] - 1;
+      gcOffsetsMax[s] = gcOffsetsTypeS[s] + gcLenTypeS[s] - 1;
+    }
+
+    // Hoisted invariants (F3 optimization)
+    float convm = float(1.e10 / h0);
+    float t0 = getY(z_tlist, age_tlist, zsim);
+
+    countSH4.assign(num_sh, 0);
+
+    int cur_sub = 0;
+    int global_id = 0;
+
+    cout << "Ingesting particles file-by-file across " << nf_sn << " chunk files..." << endl;
+
+    for (int f = 0; f < nf_sn; f++) {
+      tngParticle.readStars(f);
+      const vector<double>& metal = tngParticle.getMetallicity();
+      const vector<double>& inMass = tngParticle.getInitialMass();
+      const vector<double>& sTime = tngParticle.getStellarFormationTime();
+      const vector<double>& Mass = tngParticle.getMasses();
+      const vector<double>& X_ = tngParticle.getX();
+      const vector<double>& Y_ = tngParticle.getY();
+      const vector<double>& Z_ = tngParticle.getZ();
+
+      int npart_file = (int)metal.size();
+
+      for (int p = 0; p < npart_file; p++) {
+        int pid = global_id + p;
+        float ftime = sTime[p];
+        if (ftime <= 0.0f) continue;
+
+        // Track subhalo particle count across full simulation in O(1) amortized
+        while (cur_sub + 1 < num_sh && pid > diff[cur_sub + 1]) {
+          cur_sub++;
+        }
+        int sh_id = -1;
+        if (pid >= gcOffsetsTypeS[0] && cur_sub < num_sh && pid <= gcOffsetsMax[cur_sub]) {
+          sh_id = cur_sub;
+        }
+        if (sh_id > -1) {
+          countSH4[sh_id]++;
+        }
+
+        // Coordinate manipulation in the simulation box
+        float xb = sgnX[rcase] * (float(X_[p]) / bs);
+        float yb = sgnY[rcase] * (float(Y_[p]) / bs);
+        float zb = sgnZ[rcase] * (float(Z_[p]) / bs);
+        float zr = zb;
+        float orgz = float(Z_[p]);
+
+        if (xb > 1.0f) xb -= 1.0f;
+        if (yb > 1.0f) yb -= 1.0f;
+        if (zb > 1.0f) zb -= 1.0f;
+        if (zr > 1.0f) zr -= 1.0f;
+        if (xb < 0.0f) xb += 1.0f;
+        if (yb < 0.0f) yb += 1.0f;
+        if (zb < 0.0f) zb += 1.0f;
+        if (zr < 0.0f) zr += 1.0f;
+
+        float x, y, z, zred;
+        switch (face[rcase]) {
+          case 1: x = xb; y = yb; z = zb; zred = zr; break;
+          case 2: x = xb; y = zb; z = yb; zred = yb; break;
+          case 3: x = yb; y = zb; z = xb; zred = xb; break;
+          case 4: x = yb; y = xb; z = zb; zred = zr; break;
+          case 5: x = zb; y = xb; z = yb; zred = yb; break;
+          case 6: x = zb; y = yb; z = xb; zred = xb; break;
+          default: x = xb; y = yb; z = zb; zred = zr; break;
+        }
+
+        x -= x0[rcase];
+        y -= y0[rcase];
+        z -= z0[rcase];
+        zred -= z0[rcase];
+
+        if (x > 1.0f) x -= 1.0f;
+        if (y > 1.0f) y -= 1.0f;
+        if (z > 1.0f) z -= 1.0f;
+        if (zred > 1.0f) zred -= 1.0f;
+        if (x < 0.0f) x += 1.0f;
+        if (y < 0.0f) y += 1.0f;
+        if (z < 0.0f) z += 1.0f;
+        if (zred < 0.0f) zred += 1.0f;
+
+        float zzs_val = z;
+        float zz4_val = z + float(rcase);
+        xmin = std::min(xmin, (double)x);
+        xmax = std::max(xmax, (double)x);
+        ymin = std::min(ymin, (double)y);
+        ymax = std::max(ymax, (double)y);
+        zmin = std::min(zmin, (double)zz4_val);
+        zmax = std::max(zmax, (double)zz4_val);
+        zstarmin = std::min(zstarmin, (double)zzs_val);
+        zstarmax = std::max(zstarmax, (double)zzs_val);
+        n4_total++;
+
+        // Field of view filtering (inline multiplication replacing pow)
+        double Ztmp = (zzs_val * (bs / 1.e+3) + blD_nsnap) / (bs / 1.e+3);
+        double dx = x - 0.5;
+        double dy = y - 0.5;
+        double di = sqrt(dx * dx + dy * dy + Ztmp * Ztmp) * (bs / 1.e+3);
+
+        if (di >= blD_nsnap && di < blD2_nsnap) {
+          double rai, deci, dd;
+          getPolar(dx, dy, Ztmp, &rai, &deci, &dd);
+          if (fabs(rai) <= fovradiants * 0.5 && fabs(deci) <= fovradiants * 0.5) {
+            double fovinunitbox = fovradiants * di / (bs / 1.e+3);
+            float zf = 1.0 / double(ftime) - 1.0;
+            float tf = getY(z_tlist, age_tlist, zf);
+            ids.push_back(pid);
+            fiub.push_back(fovinunitbox);
+            xs.push_back((x - 0.5) / fovinunitbox + 0.5);
+            ys.push_back((y - 0.5) / fovinunitbox + 0.5);
+            zstar.push_back(zzs_val / fovinunitbox);
+            zreds.push_back(getY(dl, zl, Ztmp * (bs / 1.e+3)));
+            ms4.push_back(float(Mass[p]) * convm);
+            ims4.push_back(float(inMass[p]) * convm);
+            mets4.push_back((long double)float(metal[p]));
+            ages4.push_back(t0 - tf);
+            xtmp.push_back(x * (bs / 1.e+3));
+            ytmp.push_back(y * (bs / 1.e+3));
+            orgZ.push_back(orgz);
+          }
+        }
+      }
+
+      global_id += npart_file;
+
+      // Continuous Peak RSS check against memory ceiling
+      checkMemoryCeiling(memory_ceiling_gb);
+    }
+  } catch (const H5::Exception& e) {
+    cerr << "Error: Missing or inaccessible HDF5 dataset/file: " << e.getDetailMsg() << endl;
+    exit(2);
+  } catch (const std::exception& e) {
+    cerr << "Error: Failed to process snapshot data: " << e.what() << endl;
+    exit(2);
+  }
+
+  cout << n4_total << "   type (4) - STAR particles re-arranged in the snapshot." << endl;
+  cout << endl;
+  cout << " n4 particles " << endl;
+  cout << "xmin = " << xmin << "\nxmax = " << xmax << endl;
+  cout << "ymin = " << ymin << "\nymax = " << ymax << endl;
+  cout << "zmin = " << zstarmin << "\nzmax = " << zstarmax << endl;
+  cout << "boxmin = " << zmin << "\nboxmax = " << zmax << endl;
+  cout << endl;
+  cout << " ... selecting only particles in fov ..." << endl;
+  cout << endl;
+
+  cout << " ... Coordinates & redshift limits ..." << endl;
+  if (!xtmp.empty() && !ytmp.empty() && !zreds.empty()) {
     cout << "xmin, xmax in Mpc/h " << double(*min_element(xtmp.begin(), xtmp.end())) << ", " << double(*max_element(xtmp.begin(), xtmp.end())) << endl;
     cout << "ymin, ymax in Mpc/h " << double(*min_element(ytmp.begin(), ytmp.end())) << ", " << double(*max_element(ytmp.begin(), ytmp.end())) << endl;
     cout << "zmin, zmax in Mpc/h " << double(*min_element(zreds.begin(), zreds.end())) << ", " << double(*max_element(zreds.begin(), zreds.end())) << endl;
-    cout << " " << endl;
-    
-    // find SHid of only the particles included in the field of view
-    idshs =inverseMap_sh_idv3(gcLenTypeS,gcOffsetsTypeS,ids, true);
-    
-    //filtering out idshs==-1, which are fuzzes
-    vector<int>idshtmp;
-    for(auto i=0;i<idshs.size();i++){
-      if (idshs[i]>-1)
-	idshtmp.push_back(idshs[i]);
-    }
-    vector<int> idsh;
-    std::unique_copy(idshtmp.begin(), idshtmp.end(), std::back_inserter(idsh));
-    idshtmp.clear();
-    idshtmp.shrink_to_fit();
-	
-    // CMz for stars
-    vector<double> cmzsh(0);
-    for (auto k=0;k<idsh.size();k++){
-      double mzs=0.;
-      double mtot=0.;
-      for(auto l=0;l<idshs.size();l++){
-	if (idshs[l]==idsh[k]){
-	  mzs= mzs + (orgZ[l]*ms4[l]);
-	  mtot+=ms4[l];
-	}
-      }
-      if (mtot != 0.0) { 
-	cmzsh.push_back(1.0 * mzs / mtot);
-      } else {
-	cmzsh.push_back(0.0);
-      }
-    }	  
-   
-    // counting number of particles in each SH from TNG cat
-    std::vector<int> NpTNG;
-    for (int i = 0; i < idsh.size(); i++) {
-      int countshTNG=0;
-      for (auto l=0;l<idSH4.size();l++){
-	if (idSH4[l]==idsh[i]){
-	  countshTNG++;
-	}
-      }
-      NpTNG.push_back(countshTNG);
-    }
-
-    std::unordered_map<int, int> countSH4;
-    for (auto id : idSH4) {
-      countSH4[id]++;
-    }
-    vector<double> CMzsh, NpshTNG;
-    for (auto k=0;k<idsh.size();k++){
-      for(auto l=0;l<idshs.size();l++){
-	if (idshs[l]==idsh[k]){
-	  CMzsh.push_back(cmzsh[k]);
-	  NpshTNG.push_back(countSH4[idsh[k]]);
-	}
-      }
-    }
-
-    idSH4.clear();
-    idSH4.shrink_to_fit();
-    NpTNG.clear();
-    cmzsh.clear();
-    NpTNG.shrink_to_fit();
-    cmzsh.shrink_to_fit();
-    
-    
-    totPartxy4=xs.size();
-    cout << totPartxy4 <<"   type (4) - STAR particles selected in the FoV."<<endl;
-    
-    
-    if (totPartxy4>0)
-      cout <<  "first subhalo ID: " << idshs[0] << "  |  last subhalo ID: " << idshs[totPartxy4-1] << endl;
-    cout << "" << endl;
-    cout << " ... Writing the output file (coords.lc.snap_plane.txt)... " << endl;
-    cout << " .. content: #(ids,x,y,redshift,mass,intial mass,metallicity, -, age, -, CM of sh with ids, Nparticles of sh with ids in sim) for stellar particles;" << endl;
     cout << endl;
-    
-    // write particles in fov on a txt file:
-    string coord_path_=rdir+"coords.lc."+snappl+"_"+conv(iplrestart,fINT)+".txt";
-    ofstream myfile2_;
-    myfile2_.open(coord_path_);
-    for (int i=0;i<totPartxy4; i++){
-      if(idshs[i]>-1)
-	myfile2_ << idshs[i] << " " << xs[i] << " " << ys[i] << " " << zreds[i] << " " << ms4[i] << " " << ims4[i] << " " << mets4[i] << " " << fiub[i] << " " << ages4[i] << " " << zstar[i]  << " " << CMzsh[i] << " " << NpshTNG[i] <<  endl;
-    }
-    myfile2_.close();
-    
-    
-	cout << ".. Coord file written .." << endl;
-        cout << "" << endl;
-	
   }
-  
-       
-  cout << " First step is concluded. " << endl;
-  cout << " ... I'm trying to free your mind, Neo ... " << endl;
+
+  // 8. Subhalo Mapping & Center of Mass Calculation (F3 single-core optimization)
+  vector<int> idshs = inverseMap_sh_idv3(gcLenTypeS, gcOffsetsTypeS, ids, true);
+
+  vector<int> idshtmp;
+  for (size_t i = 0; i < idshs.size(); i++) {
+    if (idshs[i] > -1)
+      idshtmp.push_back(idshs[i]);
+  }
+  vector<int> idsh;
+  std::unique_copy(idshtmp.begin(), idshtmp.end(), std::back_inserter(idsh));
+  idshtmp.clear();
+  idshtmp.shrink_to_fit();
+
+  // Fast O(L) group mapping: pre-index particle locations per subhalo
+  unordered_map<int, vector<int>> sh_to_indices;
+  sh_to_indices.reserve(idsh.size());
+  for (int l = 0; l < (int)idshs.size(); l++) {
+    if (idshs[l] > -1) {
+      sh_to_indices[idshs[l]].push_back(l);
+    }
+  }
+
+  // Subhalo Center-of-Mass in Z
+  vector<double> cmzsh(idsh.size(), 0.0);
+  for (size_t k = 0; k < idsh.size(); k++) {
+    const auto& indices = sh_to_indices[idsh[k]];
+    double mzs = 0.0;
+    double mtot = 0.0;
+    for (int l : indices) {
+      mzs += (orgZ[l] * ms4[l]);
+      mtot += ms4[l];
+    }
+    if (mtot != 0.0) {
+      cmzsh[k] = 1.0 * mzs / mtot;
+    } else {
+      cmzsh[k] = 0.0;
+    }
+  }
+
+  // DEAD LOOP REMOVED: NpTNG loop eliminated per F3!
+
+  // Vectorized population of CMzsh and NpshTNG in O(L)
+  vector<double> CMzsh, NpshTNG;
+  CMzsh.reserve(idshs.size() + 10);
+  NpshTNG.reserve(idshs.size() + 10);
+  for (size_t k = 0; k < idsh.size(); k++) {
+    const auto& indices = sh_to_indices[idsh[k]];
+    double cmz = cmzsh[k];
+    double np_val = countSH4[idsh[k]];
+    for (size_t idx = 0; idx < indices.size(); idx++) {
+      CMzsh.push_back(cmz);
+      NpshTNG.push_back(np_val);
+    }
+  }
+
+  int totPartxy4 = (int)xs.size();
+  cout << totPartxy4 << "   type (4) - STAR particles selected in the FoV." << endl;
+  if (totPartxy4 > 0) {
+    cout << "first subhalo ID: " << idshs[0] << "  |  last subhalo ID: " << idshs[totPartxy4 - 1] << endl;
+  }
   cout << endl;
-  //clock
-  auto stop = high_resolution_clock::now(); 
+
+  // 9. Output Generation (Buffered I/O, Deterministic Bit-Exact Preservation)
+  if (rdir.empty() || rdir.back() != '/') {
+    rdir += "/";
+  }
+  string coord_path_ = rdir + "coords.lc." + snappl + "_" + std::to_string(target_plane) + ".txt";
+  cout << " ... Writing the output file: " << coord_path_ << " ... " << endl;
+
+  ofstream myfile2_;
+  vector<char> io_buffer(65536);
+  myfile2_.rdbuf()->pubsetbuf(io_buffer.data(), io_buffer.size());
+  myfile2_.open(coord_path_);
+  if (!myfile2_.is_open()) {
+    cerr << "Error: Cannot open output file " << coord_path_ << endl;
+    exit(2);
+  }
+
+  for (int i = 0; i < totPartxy4; i++) {
+    if (idshs[i] > -1) {
+      double cmz_out = (i < (int)CMzsh.size()) ? CMzsh[i] : 0.0;
+      double np_out  = (i < (int)NpshTNG.size()) ? NpshTNG[i] : 0.0;
+      myfile2_ << idshs[i] << " " << xs[i] << " " << ys[i] << " " << zreds[i] << " " 
+               << ms4[i] << " " << ims4[i] << " " << mets4[i] << " " << fiub[i] << " " 
+               << ages4[i] << " " << zstar[i] << " " << cmz_out << " " << np_out << "\n";
+    }
+  }
+  myfile2_.close();
+
+  cout << ".. Coord file written .." << endl;
+  cout << endl;
+
+  double final_rss = getPeakRSS_MB();
+  cout << "Peak RSS: " << final_rss << " MB (Enforced Ceiling: " << memory_ceiling_gb << " GB)" << endl;
+
+  auto stop = high_resolution_clock::now();
   auto duration = duration_cast<microseconds>(stop - start);
-  cout << "execution time in [h] " <<  2.77778e-10*duration.count() << endl;
-  std::cout << "----------------------------------------------------------------------" << endl; 
-  exit(1);
-  
+  cout << "Execution time in seconds: " << duration.count() * 1e-6 << " s (" << 2.77778e-10 * duration.count() << " h)" << endl;
+  cout << "----------------------------------------------------------------------" << endl;
+
+  return 0;
 }

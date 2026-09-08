@@ -19,7 +19,7 @@ vector<int>vec_diff(vector<int>&);
 
 vector<int>vec_sum(vector<int> &,vector<int> &);
 
-double getY(std::vector<double> , std::vector<double>,double);
+double getY(const std::vector<double> &, const std::vector<double> &, double);
 
 void getPolar(double, double, double, double *, double *, double *);
 
@@ -58,4 +58,7 @@ std::vector<T> m_col_add(std::vector<std::vector<T>> const& mat) {
 void readParameters(double *, double *, double *,double *, 
                     string *,string *,string *,string *,
                     string *, string *,
-                    long *, long *, long *, string *);
+                    long *, long *, long *, string *,
+                    string *planes_file,
+                    const string& custom_ini = "");
+

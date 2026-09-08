@@ -5,6 +5,7 @@
 #include <fstream>
 #include <sstream>
 #include <cmath>
+#include <cstdlib>
 #include <algorithm>
 #include <numeric>
 #include <dirent.h>
@@ -62,7 +63,7 @@ vector<int> vec_sum(vector<int> &a,vector<int> &b){
 }
 
 // interpolating the corresponding yi, giving xi and comparing with vectors (x,y)
-double getY(std:: vector<double> x, std:: vector<double> y,double xi){
+double getY(const std::vector<double>& x, const std::vector<double>& y, double xi){
   int nn = x.size();
   if(x[0]<x[nn-1]){         
     if(xi>x[nn-1]) return y[nn-1];
@@ -134,16 +135,32 @@ int countHDF5Files(const std::string& path, const std::string& extension) {
     return count;
 }
 
-// read .ini file parameters
 void readParameters(double *boxl,double *zs, double *fov,double *res,
 		    string *filredshiftlist,string *filsnaplist, string *filtimelist, string *idc,
 		    string *pathsnap, string *rdir, 
 		    long *seedcenter, long *seedface, long *seedsign,
-		    string *sim){ 
+		    string *sim,
+		    string *planes_file,
+		    const string& custom_ini){ 
 
   string butstr;
   ifstream inputf;
-  inputf.open("lc.ini");
+  if (!custom_ini.empty()) {
+    inputf.open(custom_ini.c_str());
+  }
+  if (!inputf.is_open()) {
+    const char* env_ini = std::getenv("FORECAST_LC_INI");
+    if (env_ini != nullptr && env_ini[0] != '\0') {
+      inputf.open(env_ini);
+    }
+  }
+  if (!inputf.is_open()) {
+    inputf.open("lc.ini");
+  }
+  if (!inputf.is_open()) {
+    inputf.open("lc/lc.ini");
+  }
+
   if(inputf.is_open()){
     inputf >> butstr; // box_length of the simulation in [Mpc/h]
     inputf >> *boxl;
@@ -173,9 +190,21 @@ void readParameters(double *boxl,double *zs, double *fov,double *res,
     inputf >> *seedsign;
     inputf >> butstr; // simulation
     inputf >> *sim;
+    // planes_list.txt path
+    if (inputf >> butstr && inputf >> *planes_file) {
+      // successfully read planes_list_file from ini
+    } else {
+      *planes_file = "";
+    }
     inputf.close();
+
+    // Allow environment variable override for output directory
+    const char* env_out = std::getenv("FORECAST_OUTPUT_DIR");
+    if (env_out != nullptr && env_out[0] != '\0') {
+      *rdir = string(env_out);
+    }
   }else{
     cout << " INPUT file does not exist ... I will stop here!!! " << endl;
-    exit(1);
+    exit(2);
   }
 };

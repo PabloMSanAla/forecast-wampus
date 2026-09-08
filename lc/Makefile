@@ -10,7 +10,7 @@ CONDA_LIB = $(CONDA_PREFIX)/lib
 # Core Compiler and Standard Settings
 # Use Conda's environment variable compiler ($CXX) if available, fallback to g++
 CXX ?= g++
-CXXFLAGS = -std=c++14 -O2 -Wall -I$(CONDA_INC) -I$(CONDA_INC)/eigen3 -I./
+CXXFLAGS = -std=c++17 -O2 -Wall -I$(CONDA_INC) -I$(CONDA_INC)/eigen3 -I./
 
 # Linker Flags (Tells the loader to find libraries inside Conda at runtime)
 LDFLAGS += -L$(CONDA_LIB) -Wl,-rpath,$(CONDA_LIB)

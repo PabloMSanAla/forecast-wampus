@@ -1,12 +1,16 @@
 /*
- * @file src/ReadTNGPartcle.h
+ * @file src/readTNGParticle.h
  * @date 25/09/20
  * @author Erik Romelli - INAF-OATs
+ * Updates by Pablo M. Sanchez Alarcon - NASA Ames: 
+ *  - 8/09/26: 
+ *      Make RAM aware, add memory ceiling option, 
+ *      optimize single threaded, and improve error handling.
  */
 
 #include <vector>
 #include <iostream>
-#include "H5Cpp.h"
+#include <H5Cpp.h>
 #include <Eigen/Dense>
 
 

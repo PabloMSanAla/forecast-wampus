@@ -1,12 +1,17 @@
 /*
- * @file src/ReadTNGPartcle.cpp
+ * @file src/readTNGParticle.cpp
  * @date 25/09/20
  * @author Erik Romelli - INAF-OATs
+ * Updates by Pablo M. Sanchez Alarcon - NASA Ames: 
+ *  - 8/09/26: 
+ *      Make RAM aware, add memory ceiling option, 
+ *      optimize single threaded, and improve error handling.
  */
 
 #include <vector>
 #include <iostream>
-#include "H5Cpp.h"
+#include <cstdlib>
+#include <H5Cpp.h>
 #include <Eigen/Dense>
 #include "readTNGParticle.h"
 using namespace std;
@@ -101,7 +106,12 @@ void readTNGParticle::readCoordinates(){
 void readTNGParticle::readHeader(int cutID){
 
   std::string snapFileName = snapNameTemplate + "." + std::to_string(cutID) + ".hdf5";
-  snap = H5::H5File(snapFileName, H5F_ACC_RDONLY );
+  try {
+    snap = H5::H5File(snapFileName, H5F_ACC_RDONLY );
+  } catch (const H5::Exception& e) {
+    std::cerr << "Error: Missing or inaccessible HDF5 snapshot file: " << snapFileName << " (" << e.getDetailMsg() << ")" << std::endl;
+    exit(2);
+  }
 
   snapHeader = snap.openGroup("Header");
 
@@ -122,7 +132,12 @@ void readTNGParticle::readHeader(int cutID){
 void readTNGParticle::readStars(int cutID){
 
   std::string snapFileName = snapNameTemplate + "." + std::to_string(cutID) + ".hdf5";
-  snap = H5::H5File(snapFileName, H5F_ACC_RDONLY );
+  try {
+    snap = H5::H5File(snapFileName, H5F_ACC_RDONLY );
+  } catch (const H5::Exception& e) {
+    std::cerr << "Error: Missing or inaccessible HDF5 stars file: " << snapFileName << " (" << e.getDetailMsg() << ")" << std::endl;
+    exit(2);
+  }
 
   // Open Header group
   snapStars = snap.openGroup("PartType4");
@@ -141,7 +156,12 @@ void readTNGParticle::readStars(int cutID){
 void readTNGParticle::readFof(int cutID){
 
   std::string fofFileName = fofNameTemplate + "." + std::to_string(cutID) + ".hdf5";
-  fof = H5::H5File(fofFileName, H5F_ACC_RDONLY );
+  try {
+    fof = H5::H5File(fofFileName, H5F_ACC_RDONLY );
+  } catch (const H5::Exception& e) {
+    std::cerr << "Error: Missing or inaccessible HDF5 FOF catalog: " << fofFileName << " (" << e.getDetailMsg() << ")" << std::endl;
+    exit(2);
+  }
 
   H5::Group subhalo = fof.openGroup("Subhalo");
 
@@ -179,7 +199,12 @@ void readTNGParticle::readFof(int cutID){
 
 void readTNGParticle::readOffset(){
 
-  offset = H5::H5File(offsetFileName, H5F_ACC_RDONLY );
+  try {
+    offset = H5::H5File(offsetFileName, H5F_ACC_RDONLY );
+  } catch (const H5::Exception& e) {
+    std::cerr << "Error: Missing or inaccessible HDF5 offset file: " << offsetFileName << " (" << e.getDetailMsg() << ")" << std::endl;
+    exit(2);
+  }
 
   H5::Group subhalo = offset.openGroup("Subhalo");
 
@@ -287,7 +312,12 @@ void readTNGParticle::readGASElements(){
 void readTNGParticle::readGAS(int cutID){
 
   std::string snapFileName = snapNameTemplate + "." + std::to_string(cutID) + ".hdf5";
-  snap = H5::H5File(snapFileName, H5F_ACC_RDONLY );
+  try {
+    snap = H5::H5File(snapFileName, H5F_ACC_RDONLY );
+  } catch (const H5::Exception& e) {
+    std::cerr << "Error: Missing or inaccessible HDF5 gas file: " << snapFileName << " (" << e.getDetailMsg() << ")" << std::endl;
+    exit(2);
+  }
 
   // Open Header group
   snapGAS = snap.openGroup("PartType0"); //gas
@@ -351,7 +381,7 @@ std::vector<int> readTNGParticle::getNumPartTotal(){
   std::vector<int> n(numPartTotal.size(), 0.);
 
   for (int i = 0; i < numPartTotal.size(); i++){
-    n[i] = numPartTotal[i] | (numPartTotal_HW[i] << 32);
+    n[i] = numPartTotal[i] | ((uint64_t)numPartTotal_HW[i] << 32);
   }
 
   return n;
