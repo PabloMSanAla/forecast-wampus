@@ -517,7 +517,7 @@ int main(int argc, char** argv){
     cout << endl;
     
     //printing particles within fov on a txt file    
-    string coord_path="flux.df."+snappl+"_"+conv(iplrestart,fINT)+".txt";
+    string coord_path=rdir+"flux.df."+snappl+"_"+conv(iplrestart,fINT)+".txt";
     ofstream myfile2;
     myfile2.open(coord_path);
     for (int i=0;i<totPartxy4; i++){ //	   

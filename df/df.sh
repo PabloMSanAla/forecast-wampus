@@ -74,12 +74,10 @@ do
 done
 
 max_planes=$(printf "%s\n" "${planes[@]}" | sort -nr | head -n 1)
-PLANE_DIR=".plane_files"
-mkdir -p "$PLANE_DIR"
 
 echo "Starting batch processing with $num_processors processors"
 echo "Processing planes $init_plane to $max_planes"
-echo "Plane files created in directory: $PLANE_DIR"
+
 
 # Function to run executable_df
 run_df() {
@@ -112,12 +110,3 @@ do
     fi        
 done | parallel --bar --jobs $num_processors --colsep ' ' run_df {1} {2} {3}
 
-# Clean up .d files
-# for (( i = 0; i < $nl; i++ ))
-# do
-#     # Only clean up planes within range [init_plane, max_planes]
-#     if [[ "${planes[$i]}" -ge "$init_plane" && "${planes[$i]}" -le "$max_planes" ]];
-#     then
-#         rm "$PLANE_DIR/plane_${planes[$i]}.d"
-#     fi        
-# done
