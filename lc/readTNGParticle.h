@@ -1,5 +1,5 @@
 /*
- * @file src/readTNGParticle.h
+ * @file src/ReadTNGPartcle.h
  * @date 25/09/20
  * @author Erik Romelli - INAF-OATs
  * Updates by Pablo M. Sanchez Alarcon - NASA Ames: 
@@ -197,9 +197,6 @@ private:
   // SnapByType -> Gas (0)
   std::vector<int> gasByType;
 
-  // Coordinates
-  Eigen::MatrixXd coordinates;
-
   // SubhaloLenType
   Eigen::MatrixXd subhaloLenType;
 
@@ -211,9 +208,6 @@ private:
 
   // snap gas
   H5::Group snapGAS;
-
-  // GAS Coordinates
-  Eigen::MatrixXd coordinates_gas;
 
   // GAS Coordinates -> X
   std::vector<double> x_gas;

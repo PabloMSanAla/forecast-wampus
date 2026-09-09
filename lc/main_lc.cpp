@@ -29,18 +29,15 @@
 #include <armadillo>
 #include "functions.h"
 
-/*****************************************************************************
- *                                                                           
- *             FORECAST - lightcone construction module                      
- *                                                                           
- *  original dark matter-only code by cgiocoli@gmail.com                     
- *  updated to its final form by flaminia.fortuni@inaf.it 
- *  Updates by Pablo M. Sanchez Alarcon - NASA Ames: 
- *  - 8/09/26: 
- *      Make RAM aware, add memory ceiling option, 
- *      optimize single threaded, and improve error handling.
- *                                                                           
-*****************************************************************************/
+/*****************************************************************************/
+/*                                                                           */
+/*             FORECAST - lightcone construction module                      */
+/*                                                                           */
+/*  original dark matter-only code by cgiocoli@gmail.com                     */
+/*  updated to its final form by flaminia.fortuni@inaf.it                    */
+/*  optimized and RAM-aware streaming engine (2026)                          */
+/*                                                                           */
+/*****************************************************************************/
 
 using namespace std;
 using namespace arma;
@@ -601,18 +598,45 @@ int main(int argc, char** argv) {
   }
   test_snap.close();
 
+  struct SpoolParticle {
+    int sh_id;
+    float x;
+    float y;
+    float zred;
+    float ms4;
+    float ims4;
+    long double mets4;
+    double fiub;
+    float age;
+    float zstar;
+  };
+  const size_t BATCH_SIZE = 100000;
+
   vector<int> gcLenTypeS;
   vector<int> gcOffsetsTypeS;
-  vector<int> ids;
-  vector<float> xs, ys, zreds, ms4, ims4, ages4, zstar, orgZ;
-  vector<long double> mets4;
-  vector<double> fiub, xtmp, ytmp;
   vector<int> countSH4;
+  vector<double> sh_mzs;
+  vector<double> sh_mtot;
+  vector<int> fov_count;
+  vector<int> idsh;
+  int num_sh = 0;
+
   double xmin = 1e30, xmax = -1e30;
   double ymin = 1e30, ymax = -1e30;
   double zmin = 1e30, zmax = -1e30;
   double zstarmin = 1e30, zstarmax = -1e30;
+  double xtmp_min = 1e30, xtmp_max = -1e30;
+  double ytmp_min = 1e30, ytmp_max = -1e30;
+  double zreds_min = 1e30, zreds_max = -1e30;
   long long n4_total = 0;
+  long long totPartxy4 = 0;
+  int first_sh_id = -1;
+  int last_sh_id = -1;
+
+  if (rdir.empty() || rdir.back() != '/') {
+    rdir += "/";
+  }
+  string temp_spool_path = rdir + "temp_spool." + snappl + "_" + std::to_string(target_plane) + ".bin";
 
   try {
     readTNGParticle tngParticle;
@@ -641,7 +665,7 @@ int main(int argc, char** argv) {
     tngParticle.readOffset();
     gcOffsetsTypeS = tngParticle.getStarsByType();
 
-    int num_sh = (int)gcLenTypeS.size();
+    num_sh = (int)gcLenTypeS.size();
     vector<int> diff(num_sh);
     vector<int> gcOffsetsMax(num_sh);
     for (int s = 0; s < num_sh; s++) {
@@ -654,11 +678,24 @@ int main(int argc, char** argv) {
     float t0 = getY(z_tlist, age_tlist, zsim);
 
     countSH4.assign(num_sh, 0);
+    sh_mzs.assign(num_sh, 0.0);
+    sh_mtot.assign(num_sh, 0.0);
+
+    ofstream spool_file(temp_spool_path, ios::binary);
+    if (!spool_file.is_open()) {
+      cerr << "Error: Cannot open temporary spool file: " << temp_spool_path << endl;
+      exit(2);
+    }
+    vector<SpoolParticle> spool_buffer;
+    spool_buffer.reserve(BATCH_SIZE);
 
     int cur_sub = 0;
     int global_id = 0;
 
     cout << "Ingesting particles file-by-file across " << nf_sn << " chunk files..." << endl;
+
+    fov_count.assign(num_sh, 0);
+    idsh.clear();
 
     for (int f = 0; f < nf_sn; f++) {
       tngParticle.readStars(f);
@@ -755,19 +792,55 @@ int main(int argc, char** argv) {
             double fovinunitbox = fovradiants * di / (bs / 1.e+3);
             float zf = 1.0 / double(ftime) - 1.0;
             float tf = getY(z_tlist, age_tlist, zf);
-            ids.push_back(pid);
-            fiub.push_back(fovinunitbox);
-            xs.push_back((x - 0.5) / fovinunitbox + 0.5);
-            ys.push_back((y - 0.5) / fovinunitbox + 0.5);
-            zstar.push_back(zzs_val / fovinunitbox);
-            zreds.push_back(getY(dl, zl, Ztmp * (bs / 1.e+3)));
-            ms4.push_back(float(Mass[p]) * convm);
-            ims4.push_back(float(inMass[p]) * convm);
-            mets4.push_back((long double)float(metal[p]));
-            ages4.push_back(t0 - tf);
-            xtmp.push_back(x * (bs / 1.e+3));
-            ytmp.push_back(y * (bs / 1.e+3));
-            orgZ.push_back(orgz);
+
+            float p_ms4 = float(Mass[p]) * convm;
+            float p_ims4 = float(inMass[p]) * convm;
+            long double p_mets4 = (long double)float(metal[p]);
+            float p_age = t0 - tf;
+            float p_x = (x - 0.5) / fovinunitbox + 0.5;
+            float p_y = (y - 0.5) / fovinunitbox + 0.5;
+            float p_zstar = zzs_val / fovinunitbox;
+            float p_zred = getY(dl, zl, Ztmp * (bs / 1.e+3));
+
+            if (sh_id > -1) {
+              sh_mzs[sh_id] += (orgz * p_ms4);
+              sh_mtot[sh_id] += p_ms4;
+              fov_count[sh_id]++;
+              if (idsh.empty() || idsh.back() != sh_id) {
+                idsh.push_back(sh_id);
+              }
+            }
+
+            double p_xtmp = x * (bs / 1.e+3);
+            double p_ytmp = y * (bs / 1.e+3);
+            xtmp_min = std::min(xtmp_min, p_xtmp);
+            xtmp_max = std::max(xtmp_max, p_xtmp);
+            ytmp_min = std::min(ytmp_min, p_ytmp);
+            ytmp_max = std::max(ytmp_max, p_ytmp);
+            zreds_min = std::min(zreds_min, (double)p_zred);
+            zreds_max = std::max(zreds_max, (double)p_zred);
+
+            if (totPartxy4 == 0) first_sh_id = sh_id;
+            last_sh_id = sh_id;
+            totPartxy4++;
+
+            SpoolParticle sp{
+              sh_id,
+              p_x,
+              p_y,
+              p_zred,
+              p_ms4,
+              p_ims4,
+              p_mets4,
+              fovinunitbox,
+              p_age,
+              p_zstar
+            };
+            spool_buffer.push_back(sp);
+            if (spool_buffer.size() >= BATCH_SIZE) {
+              spool_file.write(reinterpret_cast<const char*>(spool_buffer.data()), spool_buffer.size() * sizeof(SpoolParticle));
+              spool_buffer.clear();
+            }
           }
         }
       }
@@ -777,11 +850,20 @@ int main(int argc, char** argv) {
       // Continuous Peak RSS check against memory ceiling
       checkMemoryCeiling(memory_ceiling_gb);
     }
+
+    if (!spool_buffer.empty()) {
+      spool_file.write(reinterpret_cast<const char*>(spool_buffer.data()), spool_buffer.size() * sizeof(SpoolParticle));
+      spool_buffer.clear();
+    }
+    spool_file.close();
+
   } catch (const H5::Exception& e) {
     cerr << "Error: Missing or inaccessible HDF5 dataset/file: " << e.getDetailMsg() << endl;
+    std::remove(temp_spool_path.c_str());
     exit(2);
   } catch (const std::exception& e) {
     cerr << "Error: Failed to process snapshot data: " << e.what() << endl;
+    std::remove(temp_spool_path.c_str());
     exit(2);
   }
 
@@ -797,79 +879,35 @@ int main(int argc, char** argv) {
   cout << endl;
 
   cout << " ... Coordinates & redshift limits ..." << endl;
-  if (!xtmp.empty() && !ytmp.empty() && !zreds.empty()) {
-    cout << "xmin, xmax in Mpc/h " << double(*min_element(xtmp.begin(), xtmp.end())) << ", " << double(*max_element(xtmp.begin(), xtmp.end())) << endl;
-    cout << "ymin, ymax in Mpc/h " << double(*min_element(ytmp.begin(), ytmp.end())) << ", " << double(*max_element(ytmp.begin(), ytmp.end())) << endl;
-    cout << "zmin, zmax in Mpc/h " << double(*min_element(zreds.begin(), zreds.end())) << ", " << double(*max_element(zreds.begin(), zreds.end())) << endl;
+  if (totPartxy4 > 0) {
+    cout << "xmin, xmax in Mpc/h " << xtmp_min << ", " << xtmp_max << endl;
+    cout << "ymin, ymax in Mpc/h " << ytmp_min << ", " << ytmp_max << endl;
+    cout << "zmin, zmax in Mpc/h " << zreds_min << ", " << zreds_max << endl;
     cout << endl;
   }
 
-  // 8. Subhalo Mapping & Center of Mass Calculation (F3 single-core optimization)
-  vector<int> idshs = inverseMap_sh_idv3(gcLenTypeS, gcOffsetsTypeS, ids, true);
-
-  vector<int> idshtmp;
-  for (size_t i = 0; i < idshs.size(); i++) {
-    if (idshs[i] > -1)
-      idshtmp.push_back(idshs[i]);
-  }
-  vector<int> idsh;
-  std::unique_copy(idshtmp.begin(), idshtmp.end(), std::back_inserter(idsh));
-  idshtmp.clear();
-  idshtmp.shrink_to_fit();
-
-  // Fast O(L) group mapping: pre-index particle locations per subhalo
-  unordered_map<int, vector<int>> sh_to_indices;
-  sh_to_indices.reserve(idsh.size());
-  for (int l = 0; l < (int)idshs.size(); l++) {
-    if (idshs[l] > -1) {
-      sh_to_indices[idshs[l]].push_back(l);
-    }
-  }
-
-  // Subhalo Center-of-Mass in Z
-  vector<double> cmzsh(idsh.size(), 0.0);
-  for (size_t k = 0; k < idsh.size(); k++) {
-    const auto& indices = sh_to_indices[idsh[k]];
-    double mzs = 0.0;
-    double mtot = 0.0;
-    for (int l : indices) {
-      mzs += (orgZ[l] * ms4[l]);
-      mtot += ms4[l];
-    }
-    if (mtot != 0.0) {
-      cmzsh[k] = 1.0 * mzs / mtot;
-    } else {
-      cmzsh[k] = 0.0;
-    }
-  }
-
-  // DEAD LOOP REMOVED: NpTNG loop eliminated per F3!
-
-  // Vectorized population of CMzsh and NpshTNG in O(L)
+  // 8. Subhalo Center-of-Mass & Vector Population
   vector<double> CMzsh, NpshTNG;
-  CMzsh.reserve(idshs.size() + 10);
-  NpshTNG.reserve(idshs.size() + 10);
+  CMzsh.reserve(totPartxy4 + 10);
+  NpshTNG.reserve(totPartxy4 + 10);
   for (size_t k = 0; k < idsh.size(); k++) {
-    const auto& indices = sh_to_indices[idsh[k]];
-    double cmz = cmzsh[k];
-    double np_val = countSH4[idsh[k]];
-    for (size_t idx = 0; idx < indices.size(); idx++) {
+    int sh = idsh[k];
+    double cmz = (sh_mtot[sh] != 0.0) ? (sh_mzs[sh] / sh_mtot[sh]) : 0.0;
+    double np_val = countSH4[sh];
+    int count_in_fov = fov_count[sh];
+    for (int idx = 0; idx < count_in_fov; idx++) {
       CMzsh.push_back(cmz);
       NpshTNG.push_back(np_val);
     }
   }
 
-  int totPartxy4 = (int)xs.size();
   cout << totPartxy4 << "   type (4) - STAR particles selected in the FoV." << endl;
   if (totPartxy4 > 0) {
-    cout << "first subhalo ID: " << idshs[0] << "  |  last subhalo ID: " << idshs[totPartxy4 - 1] << endl;
+    cout << "first subhalo ID: " << first_sh_id << "  |  last subhalo ID: " << last_sh_id << endl;
   }
   cout << endl;
 
-  // 9. Output Generation (Buffered I/O, Deterministic Bit-Exact Preservation)
-  if (rdir.empty() || rdir.back() != '/') {
-    rdir += "/";
-  }
+  // 9. Streaming Output Generation (64KB Buffered I/O from Temporary Binary Spool)
   string coord_path_ = rdir + "coords.lc." + snappl + "_" + std::to_string(target_plane) + ".txt";
   cout << " ... Writing the output file: " << coord_path_ << " ... " << endl;
 
@@ -879,19 +917,38 @@ int main(int argc, char** argv) {
   myfile2_.open(coord_path_);
   if (!myfile2_.is_open()) {
     cerr << "Error: Cannot open output file " << coord_path_ << endl;
+    std::remove(temp_spool_path.c_str());
     exit(2);
   }
 
-  for (int i = 0; i < totPartxy4; i++) {
-    if (idshs[i] > -1) {
-      double cmz_out = (i < (int)CMzsh.size()) ? CMzsh[i] : 0.0;
-      double np_out  = (i < (int)NpshTNG.size()) ? NpshTNG[i] : 0.0;
-      myfile2_ << idshs[i] << " " << xs[i] << " " << ys[i] << " " << zreds[i] << " " 
-               << ms4[i] << " " << ims4[i] << " " << mets4[i] << " " << fiub[i] << " " 
-               << ages4[i] << " " << zstar[i] << " " << cmz_out << " " << np_out << "\n";
+  ifstream spool_in(temp_spool_path, ios::binary);
+  if (!spool_in.is_open()) {
+    cerr << "Error: Cannot open temporary spool file: " << temp_spool_path << endl;
+    exit(2);
+  }
+
+  vector<SpoolParticle> read_buffer(BATCH_SIZE);
+  size_t particle_idx = 0;
+  while (spool_in) {
+    spool_in.read(reinterpret_cast<char*>(read_buffer.data()), BATCH_SIZE * sizeof(SpoolParticle));
+    streamsize bytes_read = spool_in.gcount();
+    size_t count = bytes_read / sizeof(SpoolParticle);
+    for (size_t i = 0; i < count; i++, particle_idx++) {
+      const auto& p = read_buffer[i];
+      if (p.sh_id > -1) {
+        double cmz_out = (particle_idx < CMzsh.size()) ? CMzsh[particle_idx] : 0.0;
+        double np_out  = (particle_idx < NpshTNG.size()) ? NpshTNG[particle_idx] : 0.0;
+        myfile2_ << p.sh_id << " " << p.x << " " << p.y << " " << p.zred << " " 
+                 << p.ms4 << " " << p.ims4 << " " << p.mets4 << " " << p.fiub << " " 
+                 << p.age << " " << p.zstar << " " << cmz_out << " " << np_out << "\n";
+      }
     }
   }
+  spool_in.close();
   myfile2_.close();
+
+  // Clean up temporary binary spool file
+  std::remove(temp_spool_path.c_str());
 
   cout << ".. Coord file written .." << endl;
   cout << endl;
