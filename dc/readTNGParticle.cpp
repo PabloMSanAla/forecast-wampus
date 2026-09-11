@@ -6,8 +6,8 @@
 
 #include <vector>
 #include <iostream>
-#include "/usr/include/hdf5/serial/H5Cpp.h"
-#include </usr/include/eigen3/Eigen/Dense>
+#include <H5Cpp.h>
+#include <Eigen/Dense>
 
 
 #include "readTNGParticle.h"
@@ -187,7 +187,12 @@ void readTNGParticle::readCoordinates(int startElement, int numElementsToRead) {
 void readTNGParticle::readHeader(int cutID){
 
   std::string snapFileName = snapNameTemplate + "." + std::to_string(cutID) + ".hdf5";
-  snap = H5::H5File(snapFileName, H5F_ACC_RDONLY );
+  try {
+    snap = H5::H5File(snapFileName, H5F_ACC_RDONLY );
+  } catch (const H5::Exception& e) {
+    std::cerr << "Error: Missing or inaccessible HDF5 snapshot file: " << snapFileName << std::endl;
+    exit(2);
+  }
 
   // Open Header group
   snapHeader = snap.openGroup("Header");
@@ -202,13 +207,19 @@ void readTNGParticle::readHeader(int cutID){
   numPartTotal_HW = readTNGParticle::getHeaderValueNonScalar<int>("NumPart_Total_HighWord");
 
   snapHeader.close();
+  snap.close();
 
 } // readHeader END
 
 void readTNGParticle::readStars(int cutID){
 
   std::string snapFileName = snapNameTemplate + "." + std::to_string(cutID) + ".hdf5";
-  snap = H5::H5File(snapFileName, H5F_ACC_RDONLY );
+  try {
+    snap = H5::H5File(snapFileName, H5F_ACC_RDONLY );
+  } catch (const H5::Exception& e) {
+    std::cerr << "Error: Missing or inaccessible HDF5 snapshot file: " << snapFileName << std::endl;
+    exit(2);
+  }
 
   // Open Header group
   snapStars = snap.openGroup("PartType4");
@@ -220,26 +231,27 @@ void readTNGParticle::readStars(int cutID){
   readTNGParticle::readCoordinates();
 
   snapStars.close();
+  snap.close();
 
 } // readStars END
 
 void readTNGParticle::openStars(int cutID) {
     std::string snapFileName = snapNameTemplate + "." + std::to_string(cutID) + ".hdf5";
-    snap = H5::H5File(snapFileName, H5F_ACC_RDONLY);
+    try {
+      snap = H5::H5File(snapFileName, H5F_ACC_RDONLY);
+    } catch (const H5::Exception& e) {
+      std::cerr << "Error: Missing or inaccessible HDF5 snapshot file: " << snapFileName << std::endl;
+      exit(2);
+    }
     snapStars = snap.openGroup("PartType4");
 }
 
 void readTNGParticle::readStars(int startElement, int numElements) {
-  cout << "enter read" << endl;
-  // Leggi solo il subset richiesto di dati stellari
   gmfMetallicity = getSnapVectorValue("GFM_Metallicity", startElement, numElements);
-  cout << "met" << endl;
   gmfInitialMass = readTNGParticle::getSnapVectorValue("GFM_InitialMass", startElement, numElements);
-  gmfStellarFormationTime = readTNGParticle::getSnapVectorValue("GFM_StellarFormationTime",  startElement, numElements);
-  masses = readTNGParticle::getSnapVectorValue("Masses",  startElement, numElements);
-  cout << "up to masses" << endl;
-  readTNGParticle::readCoordinates( startElement, numElements);
-  cout << "exit read " << endl;
+  gmfStellarFormationTime = readTNGParticle::getSnapVectorValue("GFM_StellarFormationTime", startElement, numElements);
+  masses = readTNGParticle::getSnapVectorValue("Masses", startElement, numElements);
+  readTNGParticle::readCoordinates(startElement, numElements);
 }
 
 void readTNGParticle::closeStars() {
@@ -251,7 +263,12 @@ void readTNGParticle::closeStars() {
 void readTNGParticle::readFof(int cutID){
 
   std::string fofFileName = fofNameTemplate + "." + std::to_string(cutID) + ".hdf5";
-  fof = H5::H5File(fofFileName, H5F_ACC_RDONLY );
+  try {
+    fof = H5::H5File(fofFileName, H5F_ACC_RDONLY );
+  } catch (const H5::Exception& e) {
+    std::cerr << "Error: Missing or inaccessible HDF5 FOF catalog: " << fofFileName << std::endl;
+    exit(2);
+  }
 
   H5::Group subhalo = fof.openGroup("Subhalo");
 
@@ -270,7 +287,6 @@ void readTNGParticle::readFof(int cutID){
     starsLenType = std::vector<int>(naxes[0], 0.);
     gasLenType = std::vector<int>(naxes[0], 0.);
 
-
     for (int i = 0; i < naxes[0]; i++){
       starsLenType[i] = subhaloLenType(4,i);
       gasLenType[i] = subhaloLenType(0,i);
@@ -284,13 +300,19 @@ void readTNGParticle::readFof(int cutID){
     gasLenType = std::vector<int>(0);
   }
 
+  subhalo.close();
   fof.close();
 
 } //readFof END
 
 void readTNGParticle::readOffset(){
 
-  offset = H5::H5File(offsetFileName, H5F_ACC_RDONLY );
+  try {
+    offset = H5::H5File(offsetFileName, H5F_ACC_RDONLY );
+  } catch (const H5::Exception& e) {
+    std::cerr << "Error: Missing or inaccessible HDF5 offset file: " << offsetFileName << std::endl;
+    exit(2);
+  }
 
   H5::Group subhalo = offset.openGroup("Subhalo");
 
@@ -321,9 +343,10 @@ void readTNGParticle::readOffset(){
     ;
   }
 
+  subhalo.close();
   offset.close();
 
-} //readFof END
+} //readOffset END
 
 /*
 * GAS functions
@@ -356,18 +379,12 @@ void readTNGParticle::readGASCoordinates(){
   hsize_t naxes[2];
   dataspace.getSimpleExtentDims(naxes, NULL);
 
-  coordinates_gas = Eigen::MatrixXd::Zero(naxes[1], naxes[0]);
+  std::vector<double> coord_buf(naxes[0] * 3);
+  dataset.read(coord_buf.data(), H5::PredType::NATIVE_DOUBLE);
 
-  dataset.read(coordinates_gas.data(), H5::PredType::NATIVE_DOUBLE);
-
-  x_gas = std::vector<double>(naxes[0], 0.);
-  y_gas = std::vector<double>(naxes[0], 0.);
-  z_gas = std::vector<double>(naxes[0], 0.);
-
-  for (int i = 0; i < naxes[0]; i++){
-    x_gas[i] = coordinates_gas(0,i);
-    y_gas[i] = coordinates_gas(1,i);
-    z_gas[i] = coordinates_gas(2,i);
+  z_gas.resize(naxes[0]);
+  for (size_t i = 0; i < naxes[0]; i++){
+    z_gas[i] = coord_buf[i * 3 + 2];
   }
 
   dataset.close();
@@ -377,48 +394,31 @@ void readTNGParticle::readGASCoordinates(){
 
 
 void readTNGParticle::readGASElements(){
-  /*
-  H5::DataSet dataset = snapGAS.openDataSet("GFM_Metals");
-  H5::DataSpace dataspace = dataset.getSpace();
-  hsize_t naxes[2];
-  dataspace.getSimpleExtentDims(naxes, NULL);
-
-  elements_gas = Eigen::MatrixXd::Zero(naxes[1], naxes[0]); 
-
-  dataset.read(elements_gas.data(), H5::PredType::NATIVE_DOUBLE);
-
-  H_gas = std::vector<double>(naxes[0], 0.);
-  He_gas = std::vector<double>(naxes[0], 0.);
-  C_gas = std::vector<double>(naxes[0], 0.);
-
-  for (int i = 0; i < naxes[0]; i++){
-    H_gas[i] = elements_gas(0,i);
-    He_gas[i] = elements_gas(1,i);
-    C_gas[i] = elements_gas(2,i);
-    }*/
-
 } //readGASElements END
 
 
 void readTNGParticle::readGAS(int cutID){
 
   std::string snapFileName = snapNameTemplate + "." + std::to_string(cutID) + ".hdf5";
-  snap = H5::H5File(snapFileName, H5F_ACC_RDONLY );
+  try {
+    snap = H5::H5File(snapFileName, H5F_ACC_RDONLY );
+  } catch (const H5::Exception& e) {
+    std::cerr << "Error: Missing or inaccessible HDF5 snapshot file: " << snapFileName << std::endl;
+    exit(2);
+  }
 
   // Open Header group
   snapGAS = snap.openGroup("PartType0"); //gas
 
   gmfMetallicity_gas = readTNGParticle::getGASSnapVectorValue("GFM_Metallicity");
-  // HIAbundance_gas = readTNGParticle::getGASSnapVectorValue("NeutralHydrogenAbundance");
   masses_gas = readTNGParticle::getGASSnapVectorValue("Masses");
   density_gas = readTNGParticle::getGASSnapVectorValue("Density");
   InternalEnergy_gas = readTNGParticle::getGASSnapVectorValue("InternalEnergy");
   eAbundance_gas = readTNGParticle::getGASSnapVectorValue("ElectronAbundance");
-  SFR_gas = readTNGParticle::getGASSnapVectorValue("StarFormationRate");
   readTNGParticle::readGASCoordinates();
-  readTNGParticle::readGASElements();
 
   snapGAS.close();
+  snap.close();
 
 } // readGAS END
 
@@ -468,7 +468,7 @@ std::vector<int> readTNGParticle::getNumPartTotal(){
   std::vector<int> n(numPartTotal.size(), 0.);
 
   for (int i = 0; i < numPartTotal.size(); i++){
-    n[i] = numPartTotal[i] | (numPartTotal_HW[i] << 32);
+    n[i] = numPartTotal[i] | (static_cast<uint64_t>(numPartTotal_HW[i]) << 32);
   }
 
   return n;
@@ -519,7 +519,7 @@ std::vector<double> readTNGParticle::getZ(){
 
   return z;
 
-} //getX END
+} //getZ END
 
 /*
 * get functions for fof info
@@ -553,87 +553,6 @@ std::vector<int> readTNGParticle::getGasByType(){
 
 }
 
-/*
-* get functions for GAS info
-*/
-
-std::vector<double> readTNGParticle::getGASMetallicity(){
-
-  return gmfMetallicity_gas;
-
-} //getMetallicity END
-
-std::vector<double> readTNGParticle::getGASMasses(){
-
-  return masses_gas;
-
-} //getMasses END
-
-std::vector<double> readTNGParticle::getGASDensity(){
-
-  return density_gas;
-
-} //getDensity END
-
-std::vector<double> readTNGParticle::getGASX(){
-
-  return x_gas;
-
-} //getX END
-
-std::vector<double> readTNGParticle::getGASY(){
-
-  return y_gas;
-
-} //getX END
-
-std::vector<double> readTNGParticle::getGASZ(){
-
-  return z_gas;
-
-} //getX END
-
-std::vector<double> readTNGParticle::getGASHIAbundance(){
-
-  return HIAbundance_gas;
-
-} //getHIAbundance END 
-
-std::vector<double> readTNGParticle::getGASH(){
-
-  return H_gas;
-
-} //getGASH END
-
-std::vector<double> readTNGParticle::getGASHe(){
-
-  return He_gas;
-
-} //getGASHe END
-
-std::vector<double> readTNGParticle::getGASC(){
-
-  return C_gas;
-
-} //getGASC END
-
-std::vector<double> readTNGParticle::getGASIntEnergy(){
-
-  return InternalEnergy_gas;
-
-} //get internal energy END
-
-std::vector<double> readTNGParticle::getGASeAbundance(){
-
-  return eAbundance_gas;
-
-} //get electron abundance END
-
-std::vector<double> readTNGParticle::getGASSFR(){
-
-  return SFR_gas;
-
-} //get electron abundance END
 
 
 

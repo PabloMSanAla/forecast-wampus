@@ -238,7 +238,7 @@ void read_bc03_mass(std::string infile, std::vector <double> &m){
 }
 
 int index_closest(std::vector<long double>::iterator begin, std::vector<long double>::iterator end, long double value) {   
-  auto it = std::lower_bound(begin, end, value);//, std::less<long double>());  
+  auto it = std::lower_bound(begin, end, value);
   if ( it == begin )
     return 0; 
   if (it == end)
@@ -248,13 +248,13 @@ int index_closest(std::vector<long double>::iterator begin, std::vector<long dou
   if (aft < bef){
     return std::distance(begin, it);
   }  
-  else if(aft > bef){
-    return std::distance(begin,it) - 1;
+  else {
+    return std::distance(begin, it) - 1;
   }    
 }
 
 int index_closest(std::vector<double>::iterator begin, std::vector<double>::iterator end, double value) {   
-  auto it = std::lower_bound(begin, end, value);//, std::less<long double>());  
+  auto it = std::lower_bound(begin, end, value);
   if ( it == begin )
     return 0; 
   if (it == end)
@@ -264,13 +264,13 @@ int index_closest(std::vector<double>::iterator begin, std::vector<double>::iter
   if (aft < bef){
     return std::distance(begin, it);
   }  
-  else if(aft > bef){
-    return std::distance(begin,it) - 1;
+  else {
+    return std::distance(begin, it) - 1;
   }    
 }
 
 int index_closest(std::vector<float>::iterator begin, std::vector<float>::iterator end, float value) {   
-  auto it = std::lower_bound(begin, end, value);//, std::less<long double>());  
+  auto it = std::lower_bound(begin, end, value);
   if ( it == begin )
     return 0; 
   if (it == end)
@@ -280,23 +280,41 @@ int index_closest(std::vector<float>::iterator begin, std::vector<float>::iterat
   if (aft < bef){
     return std::distance(begin, it);
   }  
-  else if(aft > bef){
-    return std::distance(begin,it) - 1;
+  else {
+    return std::distance(begin, it) - 1;
   }    
 }
 
 
 // read .ini file parameters
 void readParameters(double *boxl, float *maglim,
-		    string *filfilters, string *filsnaplist, string *filtimelist,string *idc,
-		    string *pathsnap,string *bc03dir, string *rdir,  
+		    string *filfilters, string *filsnaplist, string *filtimelist, string *idc,
+		    string *pathsnap, string *bc03dir, string *dfpath, string *rdir,  
 		    int *read,
-		    string *model, string *imf){ 
+		    string *model, string *imf,
+		    string *filextc,
+		    string *planes_file,
+		    const string& custom_ini){ 
 
   string butstr;
   ifstream inputf;
-  inputf.open("dc.ini");
-  if(inputf.is_open()){
+  if (!custom_ini.empty()) {
+    inputf.open(custom_ini.c_str());
+  }
+  if (!inputf.is_open()) {
+    const char* env_ini = std::getenv("FORECAST_DC_INI");
+    if (env_ini != nullptr && env_ini[0] != '\0') {
+      inputf.open(env_ini);
+    }
+  }
+  if (!inputf.is_open()) {
+    inputf.open("dc.ini");
+  }
+  if (!inputf.is_open()) {
+    inputf.open("dc/dc.ini");
+  }
+
+  if (inputf.is_open()) {
     inputf >> butstr; // box_length of the simulation [Mpc/h]
     inputf >> *boxl;
     inputf >> butstr; // mag_lim for reddening
@@ -307,26 +325,73 @@ void readParameters(double *boxl, float *maglim,
     inputf >> *filsnaplist;
     inputf >> butstr; // file with the snapshot list available 
     inputf >> *filtimelist;
-     inputf >> butstr; // path and file name of the comoving distance file (if not available create with astropy consistently with sim cosmology)
+    inputf >> butstr; // path and file name of the comoving distance file
     inputf >> *idc;
-    inputf >> butstr; // path where the snaphosts are located
+    inputf >> butstr; // path where the snapshots are located
     inputf >> *pathsnap;
-    inputf >> butstr; // path where bc03 software is  located
+    inputf >> butstr; // path where bc03 software is located
     inputf >> *bc03dir;
+    inputf >> butstr; // path where the outputs of df module are located
+    inputf >> *dfpath;
     inputf >> butstr; // path where outputs are located
     inputf >> *rdir;
-    inputf >> butstr; //read gas from file(=0) or from scratch(=1)
+    inputf >> butstr; // read gas from file(=0) or from scratch(=1)
     inputf >> *read;
-    inputf >> butstr; // IMF of SSP chabrier or salpeter
-    inputf >> *imf;
     inputf >> butstr; // SSP MODEL bc03 OR cb16
     inputf >> *model;
+    inputf >> butstr; // IMF of SSP chabrier or salpeter
+    inputf >> *imf;
+    // EXTINCTION_FILE path
+    if (inputf >> butstr && inputf >> *filextc) {
+      // successfully read extinction_file from ini
+    } else {
+      *filextc = "";
+    }
+    // planes_list.txt path
+    if (inputf >> butstr && inputf >> *planes_file) {
+      // successfully read planes_list_file from ini
+    } else {
+      *planes_file = "";
+    }
     inputf.close();
-  }else{
-    cout << " INPUT file does not exsit ... I will stop here!!! " << endl;
-    exit(1);
+
+    // Allow environment variable overrides
+    const char* env_out = std::getenv("FORECAST_OUTPUT_DIR");
+    if (env_out != nullptr && env_out[0] != '\0') {
+      *rdir = string(env_out);
+    }
+
+    const char* env_df = std::getenv("FORECAST_DF_DIR");
+    if (env_df != nullptr && env_df[0] != '\0') {
+      *dfpath = string(env_df);
+    } else {
+      const char* env_df_out = std::getenv("FORECAST_DF_OUTPUT_DIR");
+      if (env_df_out != nullptr && env_df_out[0] != '\0') {
+        *dfpath = string(env_df_out);
+      }
+    }
+
+    const char* env_ext = std::getenv("FORECAST_EXTINCTION_FILE");
+    if (env_ext != nullptr && env_ext[0] != '\0') {
+      *filextc = string(env_ext);
+    }
+
+    const char* env_planes = std::getenv("FORECAST_PLANES_LIST");
+    if (env_planes != nullptr && env_planes[0] != '\0') {
+      *planes_file = string(env_planes);
+    }
+
+    if (!rdir->empty() && rdir->back() != '/') {
+      *rdir += "/";
+    }
+    if (!dfpath->empty() && dfpath->back() != '/') {
+      *dfpath += "/";
+    }
+  } else {
+    cerr << "Error: dc.ini could not be found." << endl;
+    exit(2);
   }
-};
+}
 
 
 bool allNegOne(const std::vector<float>& vec) {
@@ -508,7 +573,6 @@ void SEDbc03_interp_2spec(std::vector <vector<double> > &full_table, std::vector
   
   else if (ages4>0. & ages4<20.){
     if ((ages4<=time_grid[a_indx]) & (ages4>time_grid[a_indx-1])){
-      cout << "cae i-1 and i" << endl;
       t_1 = time_grid[a_indx];
       t_2 = time_grid[a_indx-1];
       a_1 = (ages4-t_2)/(t_1-t_2);
@@ -517,7 +581,6 @@ void SEDbc03_interp_2spec(std::vector <vector<double> > &full_table, std::vector
       f_2 = full_table[a_indx-1];
     }
     else if ((ages4<time_grid[a_indx+1]) & (ages4>=time_grid[a_indx])){
-      cout << "case i and i+1" << endl;
       t_1 = time_grid[a_indx+1];
       t_2 = time_grid[a_indx];
       a_1 = (ages4-t_2)/(t_1-t_2);

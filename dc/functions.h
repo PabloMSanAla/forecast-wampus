@@ -55,10 +55,13 @@ int index_closest(std::vector<double>::iterator, std::vector<double>::iterator, 
 int index_closest(std::vector<float>::iterator, std::vector<float>::iterator, float);
 
 void readParameters(double *boxl, float *maglim,
-		    string *filfilters,string *filsnaplist, string *filtimelist,string *idc,
-		    string *pathsnap,string *bc03dir, string *rdir,  
+		    string *filfilters, string *filsnaplist, string *filtimelist, string *idc,
+		    string *pathsnap, string *bc03dir, string *dfpath, string *rdir,  
 		    int *read,
-		    string *model, string *imf);
+		    string *model, string *imf,
+		    string *filextc,
+		    string *planes_file,
+		    const string& custom_ini = "");
 
 bool allNegOne(const std::vector<float>& vec);
 
@@ -75,7 +78,7 @@ static const char ee3[] = "%4.3e";
 
 template <class T> string conv (T &val, const char *fact)
 {
-  char VAL[20]; sprintf (VAL, fact, val);
+  char VAL[32]; snprintf (VAL, sizeof(VAL), fact, val);
   return string(VAL);
 }
 

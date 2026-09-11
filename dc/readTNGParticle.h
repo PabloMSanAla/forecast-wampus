@@ -6,8 +6,8 @@
 
 #include <vector>
 #include <iostream>
-#include "/usr/include/hdf5/serial/H5Cpp.h"
-#include </usr/include/eigen3/Eigen/Dense>
+#include <H5Cpp.h>
+#include <Eigen/Dense>
 
 
 class readTNGParticle
@@ -93,19 +93,19 @@ public:
   void readGAS(int cutID);
 
   // Get functions for GAS info
-  std::vector<double> getGASMetallicity();
-  std::vector<double> getGASHIAbundance();
-  std::vector<double> getGASMasses();
-  std::vector<double> getGASDensity();
-  std::vector<double> getGASX();
-  std::vector<double> getGASY();
-  std::vector<double> getGASZ();
-  std::vector<double> getGASH();
-  std::vector<double> getGASHe();
-  std::vector<double> getGASC();
-  std::vector<double> getGASIntEnergy();
-  std::vector<double> getGASeAbundance();
-  std::vector<double> getGASSFR();
+  const std::vector<double>& getGASMetallicity() const { return gmfMetallicity_gas; }
+  const std::vector<double>& getGASHIAbundance() const { return HIAbundance_gas; }
+  const std::vector<double>& getGASMasses() const { return masses_gas; }
+  const std::vector<double>& getGASDensity() const { return density_gas; }
+  const std::vector<double>& getGASX() const { return x_gas; }
+  const std::vector<double>& getGASY() const { return y_gas; }
+  const std::vector<double>& getGASZ() const { return z_gas; }
+  const std::vector<double>& getGASH() const { return H_gas; }
+  const std::vector<double>& getGASHe() const { return He_gas; }
+  const std::vector<double>& getGASC() const { return C_gas; }
+  const std::vector<double>& getGASIntEnergy() const { return InternalEnergy_gas; }
+  const std::vector<double>& getGASeAbundance() const { return eAbundance_gas; }
+  const std::vector<double>& getGASSFR() const { return SFR_gas; }
 
   //new
   int getDimGas();
