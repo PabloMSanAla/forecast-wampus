@@ -296,12 +296,33 @@ int locate (const std::vector<T> &v, const T x){
 //read .ini file parameters
 void readParameters(double *boxl,
 		    string *filfilters, string *filsnaplist, string *filtimelist,string *idc,
-		    string *pathsnap,string *bc03dir, string *rdir,  
-		    string *model, string *imf){ 
+		    string *pathsnap,string *bc03dir, string *dcpath, string *rdir,  
+		    string *model, string *imf,
+		    string *planes_file,
+		    const string& custom_ini){ 
 
   string butstr;
   ifstream inputf;
-  inputf.open("igm.ini");
+  if (!custom_ini.empty()) {
+    inputf.open(custom_ini.c_str());
+    if (!inputf.is_open()) {
+      cerr << "Error: custom ini file " << custom_ini << " could not be found." << endl;
+      exit(2);
+    }
+  }
+  if (!inputf.is_open()) {
+    const char* env_ini = std::getenv("FORECAST_IGM_INI");
+    if (env_ini != nullptr && env_ini[0] != '\0') {
+      inputf.open(env_ini);
+    }
+  }
+  if (!inputf.is_open()) {
+    inputf.open("igm.ini");
+  }
+  if (!inputf.is_open()) {
+    inputf.open("igm/igm.ini");
+  }
+
   if(inputf.is_open()){
     inputf >> butstr; // box_length of the sim box [Mpc/h]
     inputf >> *boxl;
@@ -317,16 +338,50 @@ void readParameters(double *boxl,
     inputf >> *pathsnap;
     inputf >> butstr; // path where bc03 software is  located
     inputf >> *bc03dir;
+    inputf >> butstr; // path where the outputs of dc module are located
+    inputf >> *dcpath;
     inputf >> butstr; // path where outputs are located
     inputf >> *rdir; 
     inputf >> butstr; // SSP model bc03 OR cb16
     inputf >> *model;
     inputf >> butstr; // IMF for SSP chabrier OR salpeter
     inputf >> *imf;
+    // planes_list.txt path
+    if (inputf >> butstr && inputf >> *planes_file) {
+      // successfully read planes_list_file from ini
+    } else {
+      *planes_file = "";
+    }
     inputf.close();
+
+    // Allow environment variable overrides
+    const char* env_out = std::getenv("FORECAST_OUTPUT_DIR");
+    if (env_out != nullptr && env_out[0] != '\0') {
+      *rdir = string(env_out);
+    }
+    const char* env_dc = std::getenv("FORECAST_DC_DIR");
+    if (env_dc != nullptr && env_dc[0] != '\0') {
+      *dcpath = string(env_dc);
+    } else {
+      const char* env_dc_out = std::getenv("FORECAST_DC_OUTPUT_DIR");
+      if (env_dc_out != nullptr && env_dc_out[0] != '\0') {
+        *dcpath = string(env_dc_out);
+      }
+    }
+    const char* env_planes = std::getenv("FORECAST_PLANES_LIST");
+    if (env_planes != nullptr && env_planes[0] != '\0') {
+      *planes_file = string(env_planes);
+    }
+
+    if (!rdir->empty() && rdir->back() != '/') {
+      *rdir += "/";
+    }
+    if (!dcpath->empty() && dcpath->back() != '/') {
+      *dcpath += "/";
+    }
   }else{
-    cout << " INPUT file does not exsit ... I will stop here!!! " << endl;
-    exit(1);
+    cerr << "Error: igm.ini could not be found." << endl;
+    exit(2);
   }
 };
 
@@ -464,75 +519,84 @@ void readSSPTables(
 
 
 ///SED
-void SEDbc03_interp_2spec(std::vector <vector<double> > &full_table, std::vector<double> &time_grid,  int a_indx, float ages4,  std::vector<long double> &spe){
+void SEDbc03_interp_2spec(const std::vector<std::vector<double>>& full_table, const std::vector<double>& time_grid, int a_indx, float ages4, std::vector<long double>& spe){
 
   //Interpolating between two spectra of contiguous ages.
   double ergsa = 3.9e+33;
-  double t_1,t_2,a_1,a_2;
-  vector<double>f_1,f_2;
+  spe.clear();
 
   if(ages4<=0.){
+    spe.reserve(1221);
+    const auto& f0 = full_table[0];
     for (int i=0; i<1221; i++){
-      spe.push_back(full_table[0][i]*ergsa);
+      spe.push_back(f0[i]*ergsa);
     }
   }
-  
-
   else if(ages4>=20.){
+    spe.reserve(1221);
+    const auto& f220 = full_table[220];
     for (int i=0; i<1221; i++){
-      spe.push_back(full_table[220][i]*ergsa);
+      spe.push_back(f220[i]*ergsa);
     }
   }
-  
-  
-  else if (ages4>0. & ages4<20.){
-    if ((ages4<=time_grid[a_indx]) & (ages4>time_grid[a_indx-1])){
-      cout << "cae i-1 and i" << endl;
+  else if (ages4>0. && ages4<20.){
+    double t_1 = 0.0, t_2 = 0.0, a_1 = 0.0, a_2 = 0.0;
+    const std::vector<double>* p_f1 = nullptr;
+    const std::vector<double>* p_f2 = nullptr;
+
+    if ((ages4<=time_grid[a_indx]) && (ages4>time_grid[a_indx-1])){
       t_1 = time_grid[a_indx];
       t_2 = time_grid[a_indx-1];
       a_1 = (ages4-t_2)/(t_1-t_2);
-      a_2 = 1-a_1;
-      f_1 = full_table[a_indx];
-      f_2 = full_table[a_indx-1];
+      a_2 = 1.0-a_1;
+      p_f1 = &full_table[a_indx];
+      p_f2 = &full_table[a_indx-1];
     }
-    else if ((ages4<time_grid[a_indx+1]) & (ages4>=time_grid[a_indx])){
-      cout << "case i and i+1" << endl;
+    else if ((ages4<time_grid[a_indx+1]) && (ages4>=time_grid[a_indx])){
       t_1 = time_grid[a_indx+1];
       t_2 = time_grid[a_indx];
       a_1 = (ages4-t_2)/(t_1-t_2);
-      a_2 = 1-a_1;
-      f_1 = full_table[a_indx+1];
-      f_2 = full_table[a_indx];
+      a_2 = 1.0-a_1;
+      p_f1 = &full_table[a_indx+1];
+      p_f2 = &full_table[a_indx];
     }
     
-    for (int i=0; i<1221; i++){
-      spe.push_back((a_1*f_1[i]*ergsa)+ (a_2*f_2[i]*ergsa));
+    spe.reserve(1221);
+    if (p_f1 && p_f2) {
+      const auto& f_1 = *p_f1;
+      const auto& f_2 = *p_f2;
+      for (int i=0; i<1221; i++){
+        spe.push_back((a_1*f_1[i]*ergsa) + (a_2*f_2[i]*ergsa));
+      }
     }
   }
-  
 }
 
-
-
-
-void SEDcb16_extract_spec(std::vector <vector<double> > &full_table, std::vector<double> &time_grid, int a_indx, float ages4, std::vector<long double> &spe){
+void SEDcb16_extract_spec(const std::vector<std::vector<double>>& full_table, const std::vector<double>& time_grid, int a_indx, float ages4, std::vector<long double>& spe){
   
 //Interpolating between two spectra of contiguous ages not needed with lines
 
   double ergsa = 3.9e+33;
+  spe.clear();
   
   if(ages4<=0.){
+    spe.reserve(13391);
+    const auto& f0 = full_table[0];
     for (int i=0; i<13391; i++){
-      spe.push_back(full_table[0][i]*ergsa);
+      spe.push_back(f0[i]*ergsa);
     }
   } else if(ages4>=20.){
+    spe.reserve(13391);
+    const auto& f220 = full_table[220];
     for (int i=0; i<13391; i++){
-      spe.push_back(full_table[220][i]*ergsa);
+      spe.push_back(f220[i]*ergsa);
     }
   }
-  else if (ages4>0. & ages4<20.){
+  else if (ages4>0. && ages4<20.){
+    spe.reserve(13391);
+    const auto& fa = full_table[a_indx];
     for (int i=0; i<13391; i++){
-      spe.push_back(full_table[a_indx][i]*ergsa);
+      spe.push_back(fa[i]*ergsa);
     }
   }
 }

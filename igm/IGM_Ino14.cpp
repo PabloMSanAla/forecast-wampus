@@ -157,21 +157,9 @@ void IGM::igm_absorption(float zr, std::vector<long double> &wave, std::vector<l
 {
   //lambda is in angstrom
   //sed is in erg/s/cm2/angstrom
-
-
-  for (int l=0; l<wave.size(); l++){
-    tsed.push_back(sed[l]*exp(-1.0*tau_IGM(wave[l],zr)));
-    //cout << sed[l] << " " << wave[l] << " " << *exp(-1.0*tau_IGM(wave[l],zr)) << " " << tau_IGM(wave[l],zr) << endl; 
+  for (size_t l = 0; l < wave.size(); ++l) {
+    sed[l] *= exp(-1.0 * tau_IGM(wave[l], zr));
   }
-  sed.clear();
-  sed.shrink_to_fit();
-
-  for (int l=0; l<wave.size(); l++){
-    sed.push_back(tsed[l]);
-  }
-
-  tsed.clear();
-  tsed.shrink_to_fit();  
 }
 
 

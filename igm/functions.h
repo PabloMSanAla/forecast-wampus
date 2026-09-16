@@ -62,7 +62,7 @@ static const char ee3[] = "%4.3e";
 
 template <class T> string conv (T &val, const char *fact)
 {
-  char VAL[20]; sprintf (VAL, fact, val);
+  char VAL[32]; snprintf (VAL, sizeof(VAL), fact, val);
   return string(VAL);
 }
 
@@ -80,8 +80,10 @@ std::vector<T> m_col_add(std::vector<std::vector<T>> const& mat) {
 
 void readParameters(double *boxl,
 		    string *filfilters,string *filsnaplist, string *filtimelist,string *idc,
-		    string *pathsnap, string *bc03dir, string *rdir,  
-		    string *model, string *imf);
+		    string *pathsnap, string *bc03dir, string *dcpath, string *rdir,  
+		    string *model, string *imf,
+		    string *planes_file,
+		    const string& custom_ini = "");
 
 
 void readSSPTables(
@@ -100,6 +102,7 @@ std::string getBC03MetallicityCode(int);
 
 
 ///SED
-void SEDbc03_interp_2spec(std::vector<std::vector<double> > &full_table, std::vector<double> &time_grid,  int a_indx, float ages4, std::vector<long double> &spe);
+void SEDbc03_interp_2spec(const std::vector<std::vector<double>>& full_table, const std::vector<double>& time_grid, int a_indx, float ages4, std::vector<long double>& spe);
 
-void SEDcb16_extract_spec(std::vector<std::vector<double> > &full_table, std::vector<double> &time_grid, int a_indx, float ages4, std::vector<long double> &spe);
+void SEDcb16_extract_spec(const std::vector<std::vector<double>>& full_table, const std::vector<double>& time_grid, int a_indx, float ages4, std::vector<long double>& spe);
+

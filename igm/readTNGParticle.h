@@ -4,7 +4,7 @@
  * @author Erik Romelli - INAF-OATs
  */
 
-#include "/usr/include/hdf5/serial/H5Cpp.h"
+#include <H5Cpp.h>
 #include <vector>
 #include <Eigen/Dense>
 #include <iostream>

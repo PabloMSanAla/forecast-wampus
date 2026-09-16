@@ -194,7 +194,87 @@ void SED::z_evolABS(float zr, std::vector<long double> &wave, std::vector<long d
 
 }
 
+FilterPrecomp SED::precomputeFilter(const std::string& name,
+                                    const std::vector<long double>& fwaves,
+                                    const std::vector<long double>& fresp) {
+  FilterPrecomp fp;
+  fp.name = name;
 
+  // find lambda_min and lambda_max of the filter with a threshold (1e-4)
+  for (size_t i = 0; i < fresp.size(); ++i) {
+    if (fresp[i] >= 1.e-4) {
+      fp.lminf = (double)fwaves[i];
+      break;
+    }
+  }
+
+  for (size_t i = fresp.size(); i-- != 0;) {
+    if (fresp[i] >= 1.e-4) {
+      fp.lmaxf = (double)fwaves[i];
+      break;
+    }
+  }
+
+  fp.size_wave = (int)(2 * (fp.lmaxf - fp.lminf));
+  fp.h_step = (fp.lmaxf - fp.lminf) / (double)fp.size_wave;
+
+  std::vector<double> wave_i(fp.size_wave);
+  double val = fp.lminf;
+  for (size_t k = 0; k < (size_t)fp.size_wave; ++k) {
+    wave_i[k] = val;
+    val += fp.h_step;
+  }
+  fp.cwaves = arma::conv_to<arma::vec>::from(wave_i);
+
+  arma::vec cfresp = arma::conv_to<arma::vec>::from(fresp);
+  arma::vec cfwaves = arma::conv_to<arma::vec>::from(fwaves);
+
+  arma::interp1(cfwaves, cfresp, fp.cwaves, fp.filter_interp, "*linear", cfresp[0]);
+  fp.filter_cwaves = fp.filter_interp % fp.cwaves;
+
+  arma::vec i2 = fp.filter_interp % (1.0 / fp.cwaves);
+  arma::mat I2_mat = arma::trapz(fp.cwaves, i2);
+  fp.I2 = arma::as_scalar(I2_mat);
+
+  return fp;
+}
+
+double SED::compute_mab_fast(const std::vector<long double>& waves,
+                             const std::vector<long double>& sed,
+                             const FilterPrecomp& filter) {
+  size_t start_idx = 0;
+  while (start_idx < waves.size() && waves[start_idx] < filter.lminf) {
+    ++start_idx;
+  }
+  size_t end_idx = start_idx;
+  while (end_idx < waves.size() && waves[end_idx] <= filter.lmaxf) {
+    ++end_idx;
+  }
+
+  size_t n_pts = (end_idx > start_idx) ? (end_idx - start_idx) : 0;
+  if (n_pts == 0) {
+    return 99.0;
+  }
+
+  arma::vec nwave(n_pts);
+  arma::vec nsed(n_pts);
+  for (size_t k = 0; k < n_pts; ++k) {
+    nwave[k] = (double)waves[start_idx + k];
+    nsed[k] = (double)sed[start_idx + k];
+  }
+
+  arma::vec sed_interp;
+  arma::interp1(nwave, nsed, filter.cwaves, sed_interp, "*linear", 0.0);
+
+  arma::vec filterSpec = filter.filter_interp % sed_interp;
+  arma::vec i1 = filterSpec % filter.cwaves;
+  arma::mat I1 = arma::trapz(filter.cwaves, i1);
+
+  double flambda = arma::as_scalar(I1 / filter.I2);
+  double fnu = flambda / speedcunitas;
+  double mAB = -2.5 * log10(fnu) - 48.6;
+  return mAB;
+}
 
 double SED::compute_mab(float zr, std::vector <long double> &waves,std::vector <long double> &sed, std::vector <long double> &fwaves,std::vector <long double> &fresp){
 

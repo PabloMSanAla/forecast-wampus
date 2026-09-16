@@ -1,10 +1,26 @@
+#ifndef SED_H
+#define SED_H
+
 #include <cmath>
+#define ARMA_DONT_USE_WRAPPER
 #include <armadillo>
 #include <iostream>
 #include <vector>
 #include <string>
 #include <sstream>
 #include <fstream>
+
+struct FilterPrecomp {
+  std::string name;
+  double lminf = 0.0;
+  double lmaxf = 0.0;
+  int size_wave = 0;
+  double h_step = 0.0;
+  arma::vec cwaves;
+  arma::vec filter_interp;
+  arma::vec filter_cwaves;
+  double I2 = 0.0;
+};
 
 class SED
 {
@@ -17,6 +33,14 @@ public:
   double getY(std:: vector<double> x, std:: vector<double> y,double xi);
 
   double compute_mab(float zr, std::vector <long double> &waves,std::vector <long double> &sed, std::vector <long double> &fwaves,std::vector <long double> &fresp);
+
+  static FilterPrecomp precomputeFilter(const std::string& name,
+                                       const std::vector<long double>& fwaves,
+                                       const std::vector<long double>& fresp);
+
+  double compute_mab_fast(const std::vector<long double>& waves,
+                          const std::vector<long double>& sed,
+                          const FilterPrecomp& filter);
 
   void z_evol(float zr, std::vector<long double> &wave, std::vector<long double> &sed, std::vector<double> &zl, std::vector<double> &dlum);//double dlum
 
@@ -123,3 +147,6 @@ private:
   std::vector<long double> hl;
   long double taua;
 };
+
+#endif // SED_H
+
