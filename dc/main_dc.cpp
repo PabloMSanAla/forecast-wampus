@@ -2,7 +2,6 @@
 #include <chrono> 
 #include <iostream>
 #include <string>
-#include <filesystem>
 #include <sstream>
 #include <fstream>
 #include <vector>
@@ -259,15 +258,7 @@ int main(int argc, char** argv) {
     agelist.open(filagelist.c_str());
   }
   if (!agelist.is_open()) {
-    filagelist = "age_" + model + ".txt";
-    agelist.open(filagelist.c_str());
-  }
-  if (!agelist.is_open()) {
-    filagelist = rdir + "age_" + model + ".txt";
-    agelist.open(filagelist.c_str());
-  }
-  if (!agelist.is_open()) {
-    filagelist = "age_" + model + ".txt";
+    filagelist = "/home/pmsanch1/code/FORECAST/files/age_" + model + ".txt";
     agelist.open(filagelist.c_str());
   }
   if (!agelist.is_open()) {
@@ -322,7 +313,7 @@ int main(int argc, char** argv) {
     infiledc.open(idc_fallback.c_str());
   }
   if (!infiledc.is_open()) {
-    string idc_fallback = "/Users/pmsanch1/code/FORECAST/files/LCDM-comovingdistTNG.dat";
+    string idc_fallback = "/home/pmsanch1/code/FORECAST/files/LCDM-comovingdistTNG.dat";
     infiledc.open(idc_fallback.c_str());
   }
   if (!infiledc.is_open()) {
@@ -349,7 +340,7 @@ int main(int argc, char** argv) {
     listfilter.open(flt_fallback.c_str());
   }
   if (!listfilter.is_open()) {
-    string flt_fallback = "/Users/pmsanch1/code/FORECAST/files/filters.dat";
+    string flt_fallback = "/home/pmsanch1/code/FORECAST/files/filters.dat";
     listfilter.open(flt_fallback.c_str());
   }
   if (!listfilter.is_open()) {
@@ -374,7 +365,7 @@ int main(int argc, char** argv) {
       filter_dir = "files/filters/";
       ifstream test_f2((filter_dir + nfilter[0] + ".dat").c_str());
       if (!test_f2.is_open()) {
-        filter_dir = std::filesystem::path(filfilters).parent_path().string() + "/filters/";
+        filter_dir = "/home/pmsanch1/code/FORECAST/files/filters/";
       }
     }
   }
@@ -455,7 +446,6 @@ int main(int argc, char** argv) {
   std::vector<float> CMzsh;
   std::vector<std::vector<float>> fluxsh;
   std::vector<float> ms4sh;
-  std::vector<std::vector<long double>> galSpe;
   std::vector<int> NpshTNG_sh;
   std::vector<int> NpshTNG_first;
 
@@ -485,7 +475,6 @@ int main(int argc, char** argv) {
       CMzsh.push_back(cmzsh);
       ms4sh.push_back(0.0f);
       fluxsh.push_back(std::vector<float>(Nfilters, 0.0f));
-      galSpe.push_back(std::vector<long double>(waves.size(), 0.0L));
       NpshTNG_sh.push_back(static_cast<int>(NPTNG));
     } else {
       k = it->second;
@@ -497,23 +486,6 @@ int main(int argc, char** argv) {
     ms4sh[k] += mi;
     for (int cf = 0; cf < Nfilters; ++cf) {
       fluxsh[k][cf] += temp_flux[cf];
-    }
-
-    // Accumulate unattenuated model B spectrum for subhalo online
-    int age_inx = index_closest(age_bc03.begin(), age_bc03.end(), ai);
-    int met_inx;
-    std::vector<long double> spe;
-    if (model == "bc03") {
-      met_inx = index_closest(met_bc03.begin(), met_bc03.end(), meti);
-      SEDbc03_interp_2spec(full_table[met_inx], time_grid[met_inx], age_inx, ai, spe);
-    } else if (model == "cb16") {
-      met_inx = index_closest(met_cb16.begin(), met_cb16.end(), meti);
-      SEDcb16_extract_spec(full_table[met_inx], time_grid[met_inx], age_inx, ai, spe);
-    }
-
-    for (size_t i = 0; i < waves.size(); ++i) {
-      long double modB_val = (ai <= 0.01f) ? expl(-1.0 * pow((waves[i] / 5500.0), -0.7)) : expl(-0.3 * pow((waves[i] / 5500.0), -0.7));
-      galSpe[k][i] += (spe[i] * modB_val) * imi;
     }
 
     totPartMapxy4++;
@@ -738,57 +710,119 @@ int main(int argc, char** argv) {
     cout << endl;
   }
 
-  // 11. Flux Assignment & Dust Extinction per Subhalo
+  // 11. Flux Assignment & Dust Extinction per Subhalo (Dynamic Chunked Processing)
   cout << "... Now assigning fluxes ..." << endl;
   cout << endl;
-  std::vector<vector<double>> flux, df;  
-  flux.reserve(num_sh);
-  df.reserve(num_sh);
+  std::vector<vector<double>> flux(num_sh, vector<double>(Nfilters, 0.0));
+  std::vector<vector<double>> df(num_sh, vector<double>(Nfilters, 1.0));
 
-  for (size_t k = 0; k < num_sh; ++k) {
-    float zr = zrsh[k];    
-    std::vector<long double> modC;
-    std::vector<long double> wavesc = waves;
-    std::vector<float> ex_ls(15);
-    
-    // Compute modC Nelson+19 with mean values   
-    if (NHIm[k] != 0.0) {
-      sedy.modelC(zr, ex_curve, ex_l, ex_ls, modC, NHIm[k], Zm[k]);
-    } else {
-      modC.assign(ex_curve.size(), 1.0L);
+  // Calculate dynamic subhalo chunk size based on memory ceiling
+  double current_rss_mb = getPeakRSS_MB();
+  double target_ceiling_mb = memory_ceiling_gb * 1024.0;
+  // Reserve memory for baseline structures and safety margin
+  double available_spectrum_mb = (target_ceiling_mb - current_rss_mb) * 0.70;
+  if (available_spectrum_mb < 50.0) available_spectrum_mb = 50.0;
+
+  // Memory per subhalo spectrum in bytes (waves.size() * sizeof(long double))
+  double bytes_per_subhalo = static_cast<double>(waves.size()) * sizeof(long double);
+  size_t dynamic_chunk_size = static_cast<size_t>((available_spectrum_mb * 1024.0 * 1024.0) / bytes_per_subhalo);
+  if (dynamic_chunk_size < 1000) dynamic_chunk_size = 1000;
+  if (dynamic_chunk_size > num_sh) dynamic_chunk_size = (num_sh > 0 ? num_sh : 1);
+
+  size_t num_chunks = (num_sh == 0) ? 0 : ((num_sh + dynamic_chunk_size - 1) / dynamic_chunk_size);
+  cout << "Dynamic subhalo chunk size: " << dynamic_chunk_size 
+       << " subhalos/chunk (" << num_chunks << " chunk" << (num_chunks > 1 ? "s" : "") << " total, "
+       << "spectrum budget: " << static_cast<size_t>(available_spectrum_mb) << " MB)" << endl;
+
+  for (size_t chunk_idx = 0; chunk_idx < num_chunks; ++chunk_idx) {
+    size_t k_start = chunk_idx * dynamic_chunk_size;
+    size_t k_end = std::min(num_sh, (chunk_idx + 1) * dynamic_chunk_size);
+    size_t chunk_len = k_end - k_start;
+
+    // Allocate spectra only for active subhalo chunk
+    std::vector<std::vector<long double>> galSpe_chunk(chunk_len, std::vector<long double>(waves.size(), 0.0L));
+
+    // Stream flux.df to populate spectra for active subhalo chunk
+    ifstream ocf_chunk(filoutcat.c_str());
+    if (!ocf_chunk.is_open()) {
+      cerr << "Error: Could not re-open " << filoutcat << " for chunked SED accumulation." << endl;
+      exit(2);
     }
-    
-    // Redshift evolution
-    sedy.z_evol(zr, wavesc, galSpe[k], zl, dlum);
-   
-    // Dust attenuation
-    sedy.dust_attenuation(ex_ls, modC, wavesc, galSpe[k]);
-    
-    // Computing apparent magnitude in chosen filter; flux in [uJy]
-    vector<double> f;
-    vector<double> dfn(Nfilters, 0.0);
-    f.reserve(Nfilters);
+    char in_buf_chunk[65536];
+    ocf_chunk.rdbuf()->pubsetbuf(in_buf_chunk, sizeof(in_buf_chunk));
 
-    for (int N = 0; N < Nfilters; ++N) {
-      double m_ = sedy.compute_mab(zr, wavesc, galSpe[k], fwaves[N], fresp[N]);
-      double f_ = pow(10.0, (29.0 - (m_ + 48.6) / 2.5));
-      f.push_back(f_);
+    while (ocf_chunk >> shid >> xi >> yi >> zri >> mi >> imi >> meti >> cmzsh >> ai >> NPTNG) {
+      for (int cf = 0; cf < Nfilters; ++cf) {
+        double dummy;
+        if (!(ocf_chunk >> dummy)) break;
+      }
+      ocf_chunk.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 
-      if (fluxsh[k][N] > f_) {
-        dfn[N] = f_ / fluxsh[k][N];
-      } else {
-        dfn[N] = 1.0;
+      auto it = sh_to_idx.find(shid);
+      if (it != sh_to_idx.end()) {
+        size_t k = it->second;
+        if (k >= k_start && k < k_end) {
+          size_t local_k = k - k_start;
+
+          int age_inx = index_closest(age_bc03.begin(), age_bc03.end(), ai);
+          int met_inx;
+          std::vector<long double> spe;
+          if (model == "bc03") {
+            met_inx = index_closest(met_bc03.begin(), met_bc03.end(), meti);
+            SEDbc03_interp_2spec(full_table[met_inx], time_grid[met_inx], age_inx, ai, spe);
+          } else if (model == "cb16") {
+            met_inx = index_closest(met_cb16.begin(), met_cb16.end(), meti);
+            SEDcb16_extract_spec(full_table[met_inx], time_grid[met_inx], age_inx, ai, spe);
+          }
+
+          for (size_t i = 0; i < waves.size(); ++i) {
+            long double modB_val = (ai <= 0.01f) ? expl(-1.0 * pow((waves[i] / 5500.0), -0.7)) : expl(-0.3 * pow((waves[i] / 5500.0), -0.7));
+            galSpe_chunk[local_k][i] += (spe[i] * modB_val) * imi;
+          }
+        }
       }
     }
-    
-    flux.push_back(f);
-    df.push_back(dfn);
+    ocf_chunk.close();
+
+    // Compute dust extinction and filter fluxes for active chunk
+    for (size_t local_k = 0; local_k < chunk_len; ++local_k) {
+      size_t k = k_start + local_k;
+      float zr = zrsh[k];    
+      std::vector<long double> modC;
+      std::vector<long double> wavesc = waves;
+      std::vector<float> ex_ls(15);
+      
+      // Compute modC Nelson+19 with mean values   
+      if (NHIm[k] != 0.0) {
+        sedy.modelC(zr, ex_curve, ex_l, ex_ls, modC, NHIm[k], Zm[k]);
+      } else {
+        modC.assign(ex_curve.size(), 1.0L);
+      }
+      
+      // Redshift evolution
+      sedy.z_evol(zr, wavesc, galSpe_chunk[local_k], zl, dlum);
+     
+      // Dust attenuation
+      sedy.dust_attenuation(ex_ls, modC, wavesc, galSpe_chunk[local_k]);
+      
+      // Computing apparent magnitude in chosen filter; flux in [uJy]
+      for (int N = 0; N < Nfilters; ++N) {
+        double m_ = sedy.compute_mab(zr, wavesc, galSpe_chunk[local_k], fwaves[N], fresp[N]);
+        double f_ = pow(10.0, (29.0 - (m_ + 48.6) / 2.5));
+        flux[k][N] = f_;
+
+        if (fluxsh[k][N] > f_) {
+          df[k][N] = f_ / fluxsh[k][N];
+        } else {
+          df[k][N] = 1.0;
+        }
+      }
+    }
+
+    // Free chunk memory immediately
+    std::vector<std::vector<long double>>().swap(galSpe_chunk);
+    checkMemoryCeiling(memory_ceiling_gb);
   }
-
-  // Free galSpe immediately to minimize memory footprint
-  std::vector<std::vector<long double>>().swap(galSpe);
-
-  checkMemoryCeiling(memory_ceiling_gb);
 
   auto stop3 = high_resolution_clock::now(); 
   auto duration3 = duration_cast<microseconds>(stop3 - start);

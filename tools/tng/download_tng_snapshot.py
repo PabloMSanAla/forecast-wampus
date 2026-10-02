@@ -153,7 +153,7 @@ def process_chunk(sim: str, snap: int, chunk_idx: int, n_chunks: int, info: dict
     tag = f"[{chunk_idx}/{n_chunks - 1}] {info['filename']}"
 
     if file_is_valid(dest_path, expected):
-        log(f"{tag}: OK (checksum matches).")
+        # log(f"{tag}: OK (checksum matches).")
         return chunk_idx, "ok"
 
     if check_only:
