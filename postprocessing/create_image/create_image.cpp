@@ -11,11 +11,13 @@
 #include <stdio.h>     
 #include <stdlib.h>     
 #include <ctime>
-#include <bits/stdc++.h> 
 #include <typeinfo>
 #include <cassert>
+#include <limits>
+#include <memory>
+#include <valarray>
 #include <CCfits/CCfits>
-#include <FitsError.h>
+#include <CCfits/FitsError.h>
 #include "functions.h"
 
 
@@ -58,210 +60,230 @@ int main(int argc, char** argv){
   cout << "   -                                                    - " << endl;
   cout << "   -               creating the final image             - " << endl;
   cout << "   ------------------------------------------------------ " << endl;
-  cout << " " << endl;
-  cout << " " << endl; 
-  // check if the file restart exsits ... 
-  std:: string fileplstart = std::string(argv[2])+".d";
-  int iplrestart=0;
-  std:: ifstream infileplstart;
-  infileplstart.open(fileplstart.c_str());
-  if(infileplstart.is_open()){
-    std::cout << " " << std:: endl;
-    std:: cout << " I will read the restart file >> " << fileplstart << std:: endl;
-    infileplstart >> iplrestart;
-    std:: cout << " iplrestart = " << iplrestart << std:: endl;
-    std:: cout << " " << std:: endl;
-    infileplstart.close();
+  // 1. Check CLI arguments
+  string custom_ini = "";
+  vector<string> positional_args;
+
+  for (int i = 1; i < argc; i++) {
+    string arg = argv[i];
+    if (arg == "-ini") {
+      if (i + 1 < argc) {
+        custom_ini = argv[++i];
+      } else {
+        cerr << "Error: -ini option requires a file path." << endl;
+        exit(1);
+      }
+    } else if (arg == "-h" || arg == "--help") {
+      cout << "Usage: " << argv[0] << " <snapshot> <plane_number> [-ini <image.ini>]" << endl;
+      exit(0);
+    } else {
+      positional_args.push_back(arg);
+    }
   }
 
-  // reading files
-  int sourceID=std::atoi(argv[1]);
-  int n_pl;
-  float blD, blD2, zsim, invh0=1./h0;
-  string fplane= "../../lc/planes_list.txt";
-  ifstream oplane;  
-  oplane.open(fplane.c_str());
-  if(oplane.is_open()){
-    int npl,reppl,blsnappl;
-    float zpl, blDpl, blD2pl,zpltrue;
-    
-    while(oplane >> npl >> zpl >> blDpl >> blD2pl >> reppl >> blsnappl >> zpltrue){
-      if(npl-1==iplrestart && blsnappl==sourceID){
-	n_pl=npl;
-	blD=blDpl;
-	blD2=blD2pl;
-	zsim=zpl;
-      }
-      
-    }
-    oplane.close();
-  }
-  else{
-    cout << "  " << endl;
-    cout << " planes list file " << fplane << endl;
-    cout << " does not exists for this snapshot. " << endl;
-    cout << " I will STOP here!!! " << endl;
+  if (positional_args.size() < 2) {
+    cerr << "Usage: " << argv[0] << " <snapshot> <plane_number> [-ini <image.ini>]" << endl;
     exit(1);
   }
 
-  string snappl= std::string(argv[1]);
-  string plane= std::string(argv[2]);
-  // ******************** to be read in the INPUT file ********************
-  // ... fov in degrees
-  float fov,res;
-  // ... filter & module to read
-  string filter, module, rdir;
-  // .. filter position in filter list
-  int pos;
+  string snappl = positional_args[0];
+  string plane = positional_args[1];
+  int sourceID = std::atoi(snappl.c_str());
+  int iplrestart = std::atoi(plane.c_str());
 
-  readParameters(&fov,&res,
-		 &filter,
-		 &module,
-		 &rdir);
-  
-  //pixels of the image
-  unsigned long int truenpix=int(fov*3600/res);
-  int bufferpix=int(ceil((truenpix + 1)*20 / 14142));  // add bufferpix/2 in each side!
-  unsigned long int npix=truenpix+bufferpix;
+  // check if the restart file exists (for legacy compatibility)
+  std::string fileplstart = plane + ".d";
+  std::ifstream infileplstart;
+  infileplstart.open(fileplstart.c_str());
+  if (infileplstart.is_open()) {
+    cout << " " << endl;
+    cout << " I will read the restart file >> " << fileplstart << endl;
+    infileplstart >> iplrestart;
+    cout << " iplrestart = " << iplrestart << endl;
+    cout << " " << endl;
+    infileplstart.close();
+  }
+
+  // 2. Read Configuration from image.ini
+  float fov, res;
+  string filter, filfilters, planes_file, module, catpath, rdir;
+
+  readParameters(&fov, &res,
+                 &filter,
+                 &filfilters,
+                 &planes_file,
+                 &module,
+                 &catpath,
+                 &rdir,
+                 custom_ini);
+
+
+  // 3. Resolve and read planes_list.txt from configuration
+  int n_pl = 0;
+  float blD = 0.0f, blD2 = 0.0f, zsim = 0.0f, invh0 = 1.0f / h0;
+  bool plane_matched = false;
+
+  ifstream oplane;  
+  oplane.open(planes_file.c_str());
+  if (oplane.is_open()) {
+    int npl, reppl, blsnappl;
+    float zpl, blDpl, blD2pl, zpltrue;
+    
+    while (oplane >> npl >> zpl >> blDpl >> blD2pl >> reppl >> blsnappl >> zpltrue) {
+      if ((reppl == iplrestart || npl - 1 == iplrestart) && blsnappl == sourceID) {
+        n_pl = npl;
+        blD = blDpl;
+        blD2 = blD2pl;
+        zsim = zpl;
+        plane_matched = true;
+        break;
+      }
+    }
+    oplane.close();
+  } else {
+    cerr << "Error: planes list file " << planes_file << " could not be opened." << endl;
+    exit(2);
+  }
+
+  if (!plane_matched) {
+    cerr << "Error: Snapshot " << sourceID << " and plane " << iplrestart
+         << " do not match any entry in " << planes_file << "." << endl;
+    exit(1);
+  }
+
+  // Pixels of the image
+  unsigned long int truenpix = int(fov * 3600.0 / res);
+  int bufferpix = int(ceil((truenpix + 1) * 20 / 14142));  // add bufferpix/2 on each side
+  unsigned long int npix = truenpix + bufferpix;
 
   cout << "N. pixels: " << truenpix << "; buffer pixels: " << bufferpix << endl;
   cout << endl;
 
-  vector<float> idshs(0), xs(0),ys(0),fH(0);
+  vector<float> idshs(0), xs(0), ys(0), fH(0);
   vector<vector<double>> fluxmap;
 
-  cout << "... Reading filter list ..." << endl;
+  cout << "... Reading filter list from " << filfilters << " ..." << endl;
 
-  // read filter list
-  string filfilters="../../"+module+"/filters.dat";
+  // 4. Read filter list from configuration
   ifstream listfilter;
   listfilter.open(filfilters.c_str());
-  vector <string> nfilter;
-  if(listfilter.is_open()){
+  vector<string> nfilter;
+  if (listfilter.is_open()) {
     string buta;
-    while(listfilter >> buta){
+    while (listfilter >> buta) {
       nfilter.push_back(buta);
     }
     listfilter.close();
-  }  		 
-  else{
-    cout << filfilters << " filter list file does not " << endl;   
-    cout << " exist in the Code dir ... check this out      " << endl;
-    cout << "    I will STOP here !!! " << endl;
-    exit(1);
+  } else {
+    cerr << "Error: filter list file " << filfilters << " could not be opened. Please check FILTERS_FILE in image.ini." << endl;
+    exit(2);
   }
 
-  //find filter position in filter list
-  int Nfilters= nfilter.size();
-  for(auto i=0;i<Nfilters;i++){
-    if (nfilter[i]==filter){
-      pos=i;
+  // Find filter position in filter list
+  int pos = -1;
+  int Nfilters = (int)nfilter.size();
+  for (int i = 0; i < Nfilters; i++) {
+    if (nfilter[i] == filter) {
+      pos = i;
+      break;
     }
   }
 
+  if (pos == -1) {
+    cerr << "Error: filter '" << filter << "' not found in filter list file " << filfilters << "." << endl;
+    exit(1);
+  }
 
-  if(module=="dc" || module=="igm"){
+  // 5. Read input particle catalog from configured directory
+  string filoutcat = catpath + "flux." + module + "." + snappl + "_" + plane + ".txt";
 
+  if (module == "dc" || module == "igm") {
     cout << " " << endl;
-    cout << "... Reading input file (flux."<< module<<".snap_plane.txt) from " << module << "  module ..." << endl;
+    cout << "... Reading input file (" << filoutcat << ") from " << module << " module ..." << endl;
     cout << " .. content: #(ids,x,y,redshift,mass,intial mass,metallicity, age) for stellar particles;" << endl;
     cout << " ..          #(Zgas_w, NHIgas_w) computed on galaxy-basis, for galaxies with id==ids." << endl;
     cout << " ..          #(Np_sh, N_sim): number of particles with ids in the lightcone, number of particle with ids in the original simulation." << endl;
     cout << " ..          #(reddened flux in Nfilters) for stellar particles." << endl;
     cout << endl;
     
-    // reading input catalogue (dust-corrected or dc+igm-correctedfluxes)
-    string filoutcat="../../"+module+"/flux."+module+"."+snappl+"_"+plane+".txt";         
     ifstream ocf;
     ocf.open(filoutcat.c_str());  
-    if(ocf.is_open()){
-      int shid,npsh,npshtng;
-      float xi,yi,zi,zri,mi,imi,ai,Zmi;
+    if (ocf.is_open()) {
+      int shid, npsh, npshtng;
+      float xi, yi, zi, zri, mi, imi, ai, Zmi;
       double NHImi;
       long double meti;
-      while (ocf >> shid >> xi >> yi  >> zri >> mi >> imi >> meti >> ai >>  Zmi >> NHImi >> npsh >> npshtng) {
-	idshs.push_back(shid);
-	xs.push_back(xi);
-	ys.push_back(yi);
-	std::vector<double> temp_flux;
-	double temp_val;
-	int cf = 0;
-	while (cf < Nfilters) {
-	  if (ocf >> temp_val) {
+      while (ocf >> shid >> xi >> yi >> zri >> mi >> imi >> meti >> ai >> Zmi >> NHImi >> npsh >> npshtng) {
+        idshs.push_back(shid);
+        xs.push_back(xi);
+        ys.push_back(yi);
+        std::vector<double> temp_flux;
+        double temp_val;
+        int cf = 0;
+        while (cf < Nfilters) {
+          if (ocf >> temp_val) {
             temp_flux.push_back(temp_val);
             cf += 1;
-	  } else {
+          } else {
             break;
-	  }
-	}
-	fluxmap.push_back(temp_flux);
-	ocf.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+          }
+        }
+        fluxmap.push_back(temp_flux);
+        ocf.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
       }    
       ocf.close();
+    } else {
+      cerr << "Error: catalog file " << filoutcat << " does not exist. Please check PATH_WHERE_CATALOGUES_ARE_LOCATED in image.ini." << endl;
+      exit(2);
     }
-    else{
-      cout << "  " << endl;
-      cout << filoutcat << "  file " << endl;
-      cout << " does not exists for this snapshot. " << endl;
-      cout << " I will STOP here!!! " << endl;
-      exit(1);
-    }
-
-  }
-  else if(module=="df"){
-
-    cout << "... Reading dust-free particle-based catalog produced in the " << module << " module ..." << endl;
+  } else if (module == "df") {
+    cout << "... Reading dust-free particle-based catalog (" << filoutcat << ") produced in the " << module << " module ..." << endl;
     cout << " .. content: #(ids,x,y,redshift,mass,intial mass,metallicity, CM_sh, age, N_sim) for stellar particles;" << endl;
     cout << " ..          #(dust-free flux in Nfilters) for stellar particles." << endl;
     cout << endl;
     
-    // reading df output catalogue (dust-free fluxes)
-    string filoutcat="../../"+module+"/flux."+module+"."+snappl+"_"+plane+".txt";
     ifstream ocf;
     ocf.open(filoutcat.c_str());
-    if(ocf.is_open()){
+    if (ocf.is_open()) {
       int shid, NPTNG;
-      float xi,yi,zi,zri,mi,imi,ai,fi, sni, cmzsh;
+      float xi, yi, zi, zri, mi, imi, ai, fi, sni, cmzsh;
       long double meti, mabi;
-      while (ocf >> shid >> xi >> yi  >> zri >> mi >> imi >> meti >> cmzsh >> ai >> NPTNG) { 
-	idshs.push_back(shid);
-	xs.push_back(xi);
-	ys.push_back(yi);
-	std::vector<double> temp_flux;
-	double temp_val;
-	int cf = 0;
-	while (cf < Nfilters) {
-	  if (ocf >> temp_val) {
+      while (ocf >> shid >> xi >> yi >> zri >> mi >> imi >> meti >> cmzsh >> ai >> NPTNG) { 
+        idshs.push_back(shid);
+        xs.push_back(xi);
+        ys.push_back(yi);
+        std::vector<double> temp_flux;
+        double temp_val;
+        int cf = 0;
+        while (cf < Nfilters) {
+          if (ocf >> temp_val) {
             temp_flux.push_back(temp_val);
             cf += 1;
-	  } else {
+          } else {
             break;
-	  }
-	}
-	fluxmap.push_back(temp_flux);
-	ocf.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+          }
+        }
+        fluxmap.push_back(temp_flux);
+        ocf.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
       }    
       ocf.close();
+    } else {
+      cerr << "Error: catalog file " << filoutcat << " does not exist. Please check PATH_WHERE_CATALOGUES_ARE_LOCATED in image.ini." << endl;
+      exit(2);
     }
-    else{
-      cout << "  " << endl;
-      cout << filoutcat << " file: " << filoutcat << endl;
-      cout << " does not exists for this snapshot. " << endl;
-      cout << " I will STOP here!!! " << endl;
-      exit(1);
-    }
+  } else {
+    cerr << "Error: Unknown module '" << module << "'. Must be df, dc, or igm." << endl;
+    exit(1);
   }
 
   // collecting fluxes for the final image
-  for (int j = 0; j < fluxmap.size(); j++) {
-    std::vector<float> magsh_j;    
-      fH.push_back(fluxmap[j][pos]);
+  for (size_t j = 0; j < fluxmap.size(); j++) {
+    fH.push_back(fluxmap[j][pos]);
   }
 
-  
-  std::valarray<float> mapxy4( npix*npix );
-  string pixu="flux [uJ]";
-  string fileoutput=rdir+"/"+filter+"."+module+"."+snappl+"_"+plane+".fits";
+  std::valarray<float> mapxy4(npix * npix);
+  string pixu = "flux [uJ]";
+  string fileoutput = rdir + filter + "." + module + "." + snappl + "_" + plane + ".fits";
   
   //make the map
   mapxy4=gridist_nok(xs,ys,fH,npix);
@@ -271,7 +293,7 @@ int main(int argc, char** argv){
   if(ntotxy4>0){
     
           long naxis = 2;
-	  long naxes[2]={ truenpix,truenpix };
+	  long naxes[2]={ static_cast<long>(truenpix), static_cast<long>(truenpix) };
 	  string count="1";
 	  
 	  std::unique_ptr<FITS> ffxy( new FITS(fileoutput, FLOAT_IMG, naxis, naxes ) ); 

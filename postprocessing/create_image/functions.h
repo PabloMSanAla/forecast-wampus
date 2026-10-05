@@ -57,9 +57,15 @@ int index_closest(std::vector<double>::iterator, std::vector<double>::iterator, 
 
 int index_closest(std::vector<float>::iterator, std::vector<float>::iterator, float);
 
-void readParameters(float* fov,float* res,
+void readParameters(float* fov, float* res,
                     std::string* filter,
-                    std::string* module, std::string* rdir);
+                    std::string* filfilters,
+                    std::string* planes_file,
+                    std::string* module,
+                    std::string* catpath,
+                    std::string* rdir,
+                    const std::string& custom_ini = "");
+
 
 bool allNegOne(const std::vector<float>& vec);
 

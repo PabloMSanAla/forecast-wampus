@@ -253,7 +253,7 @@ int index_closest(std::vector<long double>::iterator begin, std::vector<long dou
   if (aft < bef){
     return std::distance(begin, it);
   }  
-  else if(aft > bef){
+  else {
     return std::distance(begin,it) - 1;
   }    
 }
@@ -269,7 +269,7 @@ int index_closest(std::vector<double>::iterator begin, std::vector<double>::iter
   if (aft < bef){
     return std::distance(begin, it);
   }  
-  else if(aft > bef){
+  else {
     return std::distance(begin,it) - 1;
   }    
 }
@@ -285,20 +285,41 @@ int index_closest(std::vector<float>::iterator begin, std::vector<float>::iterat
   if (aft < bef){
     return std::distance(begin, it);
   }  
-  else if(aft > bef){
+  else {
     return std::distance(begin,it) - 1;
   }    
 }
 
 
 // read .ini file parameters
-void readParameters(float* fov,float* res,
+void readParameters(float* fov, float* res,
                     std::string* filter,
-                    std::string* module, std::string* rdir){ 
+                    std::string* filfilters,
+                    std::string* planes_file,
+                    std::string* module,
+                    std::string* catpath,
+                    std::string* rdir,
+                    const std::string& custom_ini){ 
 
   string butstr;
   ifstream inputf;
-  inputf.open("image.ini");
+  if (!custom_ini.empty()) {
+    inputf.open(custom_ini.c_str());
+  }
+  if (!inputf.is_open()) {
+    const char* env_ini = std::getenv("FORECAST_IMAGE_INI");
+    if (env_ini != nullptr && env_ini[0] != '\0') {
+      inputf.open(env_ini);
+    }
+  }
+  if (!inputf.is_open()) {
+    inputf.open("image.ini");
+  }
+  if (!inputf.is_open()) {
+    inputf.open("postprocessing/create_image/image.ini");
+  }
+
+
   if(inputf.is_open()){
     inputf >> butstr; // fov dim by side in degrees
     inputf >> *fov;
@@ -306,13 +327,36 @@ void readParameters(float* fov,float* res,
     inputf >> *res;
     inputf >> butstr; // filters name in filter file
     inputf >> *filter;
+    inputf >> butstr; // filters list file
+    inputf >> *filfilters;
+    inputf >> butstr; // planes list file
+    inputf >> *planes_file;
     inputf >> butstr; // module from which make the image (df, dc, igm)
     inputf >> *module;
+    inputf >> butstr; // path where input catalogues are located
+    inputf >> *catpath;
     inputf >> butstr; // path where outputs are located
     inputf >> *rdir;  
     inputf.close();
+
+    // Allow environment variable overrides
+    const char* env_out = std::getenv("FORECAST_OUTPUT_DIR");
+    if (env_out != nullptr && env_out[0] != '\0') {
+      *rdir = string(env_out);
+    }
+    const char* env_planes = std::getenv("FORECAST_PLANES_LIST");
+    if (env_planes != nullptr && env_planes[0] != '\0') {
+      *planes_file = string(env_planes);
+    }
+
+    if (!rdir->empty() && rdir->back() != '/') {
+      *rdir += "/";
+    }
+    if (!catpath->empty() && catpath->back() != '/') {
+      *catpath += "/";
+    }
   }else{
-    cout << " INPUT file does not exsit ... I will stop here!!! " << endl;
+    cerr << "Error: image.ini input file does not exist ... I will stop here!!!" << endl;
     exit(1);
   }
 };
@@ -498,7 +542,6 @@ void SEDbc03_interp_2spec(std::vector <vector<double> > &full_table, std::vector
   
   else if (ages4>0. & ages4<20.){
     if ((ages4<=time_grid[a_indx]) & (ages4>time_grid[a_indx-1])){
-      cout << "cae i-1 and i" << endl;
       t_1 = time_grid[a_indx];
       t_2 = time_grid[a_indx-1];
       a_1 = (ages4-t_2)/(t_1-t_2);
@@ -507,7 +550,6 @@ void SEDbc03_interp_2spec(std::vector <vector<double> > &full_table, std::vector
       f_2 = full_table[a_indx-1];
     }
     else if ((ages4<time_grid[a_indx+1]) & (ages4>=time_grid[a_indx])){
-      cout << "case i and i+1" << endl;
       t_1 = time_grid[a_indx+1];
       t_2 = time_grid[a_indx];
       a_1 = (ages4-t_2)/(t_1-t_2);
