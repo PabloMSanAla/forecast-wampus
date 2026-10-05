@@ -9,6 +9,7 @@
 #include <numeric>
 #include <dirent.h>
 #include <map>
+#include <filesystem>
 #include "functions.h"
 using namespace std;
 
@@ -303,24 +304,29 @@ void readParameters(double *boxl,
 
   string butstr;
   ifstream inputf;
+  string used_ini_path;
   if (!custom_ini.empty()) {
     inputf.open(custom_ini.c_str());
     if (!inputf.is_open()) {
       cerr << "Error: custom ini file " << custom_ini << " could not be found." << endl;
       exit(2);
     }
+    used_ini_path = custom_ini;
   }
   if (!inputf.is_open()) {
     const char* env_ini = std::getenv("FORECAST_IGM_INI");
     if (env_ini != nullptr && env_ini[0] != '\0') {
       inputf.open(env_ini);
+      if (inputf.is_open()) used_ini_path = env_ini;
     }
   }
   if (!inputf.is_open()) {
     inputf.open("igm.ini");
+    if (inputf.is_open()) used_ini_path = "igm.ini";
   }
   if (!inputf.is_open()) {
     inputf.open("igm/igm.ini");
+    if (inputf.is_open()) used_ini_path = "igm/igm.ini";
   }
 
   if(inputf.is_open()){
@@ -379,6 +385,27 @@ void readParameters(double *boxl,
     if (!dcpath->empty() && dcpath->back() != '/') {
       *dcpath += "/";
     }
+
+    auto fix_relative = [&](string* path) {
+      if (path && !path->empty() && !filesystem::exists(*path)) {
+        if (!used_ini_path.empty()) {
+          filesystem::path base = filesystem::path(used_ini_path).parent_path();
+          if (!base.empty() && filesystem::exists(base / *path)) {
+            *path = (base / *path).lexically_normal().string();
+            return;
+          }
+        }
+        if (path->rfind("../", 0) == 0 && filesystem::exists(path->substr(3))) {
+          *path = path->substr(3);
+          return;
+        }
+      }
+    };
+    fix_relative(filfilters);
+    fix_relative(filsnaplist);
+    fix_relative(filtimelist);
+    fix_relative(idc);
+    fix_relative(planes_file);
   }else{
     cerr << "Error: igm.ini could not be found." << endl;
     exit(2);

@@ -73,21 +73,7 @@ inline void checkMemoryCeiling(double ceiling_gb) {
   }
 }
 
-struct ParticleData {
-  int shid;
-  float x;
-  float y;
-  float zred;
-  float m;
-  float im;
-  long double met;
-  float age;
-  float Zm;
-  double NHIm;
-  int npsh;
-  int npshtng;
-  vector<double> flux;
-};
+
 
 int main(int argc, char** argv) {
   auto start = high_resolution_clock::now();
@@ -395,46 +381,32 @@ int main(int argc, char** argv) {
     exit(2);
   }
 
-  // 6. Fast O(N) grouping by subhalo ID using hash map
-  vector<ParticleData> particles;
-  particles.reserve(100000);
-
+  // 6. Pass 1: Build lightweight subhalo catalog (streaming line-by-line, 0 particle memory)
   unordered_map<int, size_t> shid_to_subhalo_idx;
+  shid_to_subhalo_idx.reserve(10000);
   vector<int> idsh;
-  vector<vector<size_t>> subhalo_particles;
+  vector<int> Npsh;
   vector<double> zrsh_sum;
   vector<vector<double>> fluxsh;
+
+  char in_buf_p1[65536];
+  ocf.rdbuf()->pubsetbuf(in_buf_p1, sizeof(in_buf_p1));
 
   int shid, npsh;
   float xi, yi, zri, mi, imi, ai, Zmi;
   long double meti, npshtng;
   double NHImi;
+  vector<double> temp_flux(Nfilters, 0.0);
 
+  int totPartxy4 = 0;
   while (ocf >> shid >> xi >> yi >> zri >> mi >> imi >> meti >> ai >> Zmi >> NHImi >> npsh >> npshtng) {
-    ParticleData p;
-    p.shid = shid;
-    p.x = xi;
-    p.y = yi;
-    p.zred = zri;
-    p.m = mi;
-    p.im = imi;
-    p.met = meti;
-    p.age = ai;
-    p.Zm = Zmi;
-    p.NHIm = NHImi;
-    p.npsh = npsh;
-    p.npshtng = static_cast<int>(npshtng);
-    p.flux.resize(Nfilters);
-
     for (int cf = 0; cf < Nfilters; ++cf) {
-      if (!(ocf >> p.flux[cf])) {
-        p.flux[cf] = 0.0;
+      if (!(ocf >> temp_flux[cf])) {
+        temp_flux[cf] = 0.0;
       }
     }
     ocf.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-
-    size_t p_idx = particles.size();
-    particles.push_back(p);
+    totPartxy4++;
 
     auto it = shid_to_subhalo_idx.find(shid);
     size_t k;
@@ -442,27 +414,24 @@ int main(int argc, char** argv) {
       k = idsh.size();
       shid_to_subhalo_idx[shid] = k;
       idsh.push_back(shid);
-      subhalo_particles.emplace_back();
-      zrsh_sum.push_back(0.0);
-      fluxsh.push_back(vector<double>(Nfilters, 0.0));
+      Npsh.push_back(1);
+      zrsh_sum.push_back(zri);
+      fluxsh.push_back(temp_flux);
     } else {
       k = it->second;
-    }
-
-    subhalo_particles[k].push_back(p_idx);
-    zrsh_sum[k] += zri;
-    for (int cf = 0; cf < Nfilters; ++cf) {
-      fluxsh[k][cf] += p.flux[cf];
+      Npsh[k]++;
+      zrsh_sum[k] += zri;
+      for (int cf = 0; cf < Nfilters; ++cf) {
+        fluxsh[k][cf] += temp_flux[cf];
+      }
     }
   }
   ocf.close();
 
   size_t num_subhalos = idsh.size();
-  vector<int> Npsh(num_subhalos);
   vector<float> zrsh(num_subhalos);
   for (size_t k = 0; k < num_subhalos; ++k) {
-    Npsh[k] = (int)subhalo_particles[k].size();
-    zrsh[k] = static_cast<float>(zrsh_sum[k] / (double)Npsh[k]);
+    zrsh[k] = (Npsh[k] > 0) ? static_cast<float>(zrsh_sum[k] / (double)Npsh[k]) : 0.0f;
   }
 
   // printing some parameters for check
@@ -479,65 +448,117 @@ int main(int argc, char** argv) {
   }
   cout << "\n.......................\n" << endl;
 
-  int totPartxy4 = (int)particles.size();
   cout << "... Now assigning fluxes ...\n" << endl;
   cout << "N star particles: " << totPartxy4 << endl;
   cout << "N subhalos: " << num_subhalos << "\n" << endl;
 
-  // 7. Calculate IGM attenuation factors per subhalo (O(N) total complexity)
+  // 7. Calculate IGM attenuation factors per subhalo using dynamic chunking
   vector<vector<double>> df(num_subhalos, vector<double>(Nfilters, 1.0));
   vector<long double> met_bc03 { 0.0001, 0.0004, 0.004, 0.008, 0.02, 0.05 };
   vector<long double> met_cb16 { 0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.004, 0.006, 0.008, 0.010, 0.014, 0.017, 0.020, 0.030, 0.040 };
 
-
   size_t n_wave_pts = (model == "bc03") ? 1221 : 13391;
   vector<long double> spe;
-  vector<long double> galSpe(n_wave_pts);
   vector<long double> wavesc(n_wave_pts);
 
-  for (size_t k = 0; k < num_subhalos; ++k) {
-    float zr = zrsh[k];
-    std::fill(galSpe.begin(), galSpe.end(), 0.0);
-    std::copy(waves.begin(), waves.end(), wavesc.begin());
+  // Dynamic chunk sizing to strictly enforce memory ceiling
+  double current_rss_mb = getPeakRSS_MB();
+  double target_ceiling_mb = memory_ceiling_gb * 1024.0;
+  double available_spectrum_mb = (target_ceiling_mb - current_rss_mb) * 0.70;
+  if (available_spectrum_mb < 50.0) available_spectrum_mb = 50.0;
+  double bytes_per_subhalo = static_cast<double>(n_wave_pts) * sizeof(long double);
+  size_t dynamic_chunk_size = static_cast<size_t>((available_spectrum_mb * 1024.0 * 1024.0) / bytes_per_subhalo);
+  if (dynamic_chunk_size < 1000) dynamic_chunk_size = 1000;
+  if (dynamic_chunk_size > num_subhalos) dynamic_chunk_size = (num_subhalos > 0 ? num_subhalos : 1);
 
-    for (size_t p_idx : subhalo_particles[k]) {
-      const auto& p = particles[p_idx];
-      int age_inx = index_closest(age_bc03.begin(), age_bc03.end(), p.age);
+  const char* env_chunk = std::getenv("FORECAST_IGM_CHUNK_SIZE");
+  if (env_chunk) {
+    try {
+      size_t forced_chunk = std::stoull(env_chunk);
+      if (forced_chunk > 0) dynamic_chunk_size = forced_chunk;
+    } catch (...) {}
+  }
 
-      if (model == "bc03") {
-        int met_inx = index_closest(met_bc03.begin(), met_bc03.end(), p.met);
-        SEDbc03_interp_2spec(full_table[met_inx], time_grid[met_inx], age_inx, p.age, spe);
-      } else if (model == "cb16") {
-        int met_inx = index_closest(met_cb16.begin(), met_cb16.end(), p.met);
-        SEDcb16_extract_spec(full_table[met_inx], time_grid[met_inx], age_inx, p.age, spe);
+  size_t num_chunks = (num_subhalos == 0) ? 0 : ((num_subhalos + dynamic_chunk_size - 1) / dynamic_chunk_size);
+  cout << "Dynamic subhalo chunking: chunk_size = " << dynamic_chunk_size
+       << " subhalos (" << num_chunks << " chunks total, ceiling = "
+       << memory_ceiling_gb << " GB)" << endl;
+
+  for (size_t chunk_idx = 0; chunk_idx < num_chunks; ++chunk_idx) {
+    size_t k_start = chunk_idx * dynamic_chunk_size;
+    size_t k_end = std::min(num_subhalos, (chunk_idx + 1) * dynamic_chunk_size);
+    size_t chunk_len = k_end - k_start;
+
+    vector<vector<long double>> galSpe_chunk(chunk_len, vector<long double>(n_wave_pts, 0.0));
+
+    ifstream ocf_chunk(filoutcat.c_str());
+    if (!ocf_chunk.is_open()) {
+      cerr << "Error: Could not re-open " << filoutcat << " for chunk processing." << endl;
+      exit(2);
+    }
+    char in_buf_chunk[65536];
+    ocf_chunk.rdbuf()->pubsetbuf(in_buf_chunk, sizeof(in_buf_chunk));
+
+    while (ocf_chunk >> shid) {
+      auto it = shid_to_subhalo_idx.find(shid);
+      if (it != shid_to_subhalo_idx.end()) {
+        size_t k = it->second;
+        if (k >= k_start && k < k_end) {
+          ocf_chunk >> xi >> yi >> zri >> mi >> imi >> meti >> ai >> Zmi >> NHImi >> npsh >> npshtng;
+          // Skip filter fluxes
+          for (int cf = 0; cf < Nfilters; ++cf) {
+            double dummy;
+            ocf_chunk >> dummy;
+          }
+          ocf_chunk.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+
+          int age_inx = index_closest(age_bc03.begin(), age_bc03.end(), ai);
+          if (model == "bc03") {
+            int met_inx = index_closest(met_bc03.begin(), met_bc03.end(), meti);
+            SEDbc03_interp_2spec(full_table[met_inx], time_grid[met_inx], age_inx, ai, spe);
+          } else if (model == "cb16") {
+            int met_inx = index_closest(met_cb16.begin(), met_cb16.end(), meti);
+            SEDcb16_extract_spec(full_table[met_inx], time_grid[met_inx], age_inx, ai, spe);
+          }
+
+          size_t c_k = k - k_start;
+          for (size_t i = 0; i < n_wave_pts; ++i) {
+            galSpe_chunk[c_k][i] += spe[i] * imi;
+          }
+          continue;
+        }
       }
+      ocf_chunk.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+    }
+    ocf_chunk.close();
 
-      for (size_t i = 0; i < n_wave_pts; ++i) {
-        galSpe[i] += spe[i] * p.im;
+    // Process attenuation for subhalos in this chunk
+    for (size_t k = k_start; k < k_end; ++k) {
+      size_t c_k = k - k_start;
+      float zr = zrsh[k];
+      std::copy(waves.begin(), waves.end(), wavesc.begin());
+
+      // z evolution
+      sedy.z_evol(zr, wavesc, galSpe_chunk[c_k], zl, dlum);
+
+      // IGM attenuation
+      igmy.igm_absorption(zr, wavesc, galSpe_chunk[c_k]);
+
+      // compute apparent magnitude and IGM attenuation factor in each filter
+      for (int N = 0; N < Nfilters; ++N) {
+        double m_ = sedy.compute_mab_fast(wavesc, galSpe_chunk[c_k], filter_cache[N]);
+        double f_ = pow(10.0, (29.0 - (m_ + 48.6) / 2.5)); // uJy
+
+        if (fluxsh[k][N] > f_) {
+          df[k][N] = f_ / fluxsh[k][N];
+        } else {
+          df[k][N] = 1.0;
+        }
       }
     }
 
-    // z evolution
-    sedy.z_evol(zr, wavesc, galSpe, zl, dlum);
-
-    // IGM attenuation
-    igmy.igm_absorption(zr, wavesc, galSpe);
-
-    // compute apparent magnitude and IGM attenuation factor in each filter
-    for (int N = 0; N < Nfilters; ++N) {
-      double m_ = sedy.compute_mab_fast(wavesc, galSpe, filter_cache[N]);
-      double f_ = pow(10.0, (29.0 - (m_ + 48.6) / 2.5)); // uJy
-
-      if (fluxsh[k][N] > f_) {
-        df[k][N] = f_ / fluxsh[k][N];
-      } else {
-        df[k][N] = 1.0;
-      }
-    }
-
-    if (k % 500 == 0) {
-      checkMemoryCeiling(memory_ceiling_gb);
-    }
+    // Check memory ceiling at chunk boundary
+    checkMemoryCeiling(memory_ceiling_gb);
   }
 
   checkMemoryCeiling(memory_ceiling_gb);
@@ -549,7 +570,7 @@ int main(int argc, char** argv) {
   cout << " ..          #(Np_sh, N_sim): number of particles with ids in the lightcone, number of particle with ids in the original simulation." << endl;
   cout << " ..          #(reddened+igm flux in Nfilters) for stellar particles.\n" << endl;
 
-  // 8. Write output with 64KB I/O buffer (O(N) loop)
+  // 8. Stream Pass 2: Write output with 64KB I/O buffer line-by-line
   if (!rdir.empty() && rdir.back() != '/') {
     rdir += "/";
   }
@@ -559,26 +580,41 @@ int main(int argc, char** argv) {
   } catch (...) {}
 
   ofstream myfile2p;
-  vector<char> io_buffer(65536);
-  myfile2p.rdbuf()->pubsetbuf(io_buffer.data(), io_buffer.size());
+  char out_buf_p2[65536];
+  myfile2p.rdbuf()->pubsetbuf(out_buf_p2, sizeof(out_buf_p2));
   myfile2p.open(ncoord_path.c_str());
   if (!myfile2p.is_open()) {
     cerr << "Error: Cannot open output file: " << ncoord_path << endl;
     exit(2);
   }
 
-  for (size_t k = 0; k < num_subhalos; ++k) {
-    for (size_t p_idx : subhalo_particles[k]) {
-      const auto& p = particles[p_idx];
-      myfile2p << p.shid << " " << p.x << " " << p.y << " " << p.zred << " "
-               << p.m << " " << p.im << " " << p.met << " " << p.age << " "
-               << p.Zm << " " << p.NHIm << " " << p.npsh << " " << p.npshtng << " ";
-      for (int f = 0; f < Nfilters; ++f) {
-        myfile2p << (p.flux[f] * df[k][f]) << " ";
-      }
-      myfile2p << "\n";
-    }
+  ifstream ocf_pass2(filoutcat.c_str());
+  if (!ocf_pass2.is_open()) {
+    cerr << "Error: Cannot re-open " << filoutcat << " for pass 2 output streaming." << endl;
+    exit(2);
   }
+  char in_buf_p2[65536];
+  ocf_pass2.rdbuf()->pubsetbuf(in_buf_p2, sizeof(in_buf_p2));
+
+  while (ocf_pass2 >> shid >> xi >> yi >> zri >> mi >> imi >> meti >> ai >> Zmi >> NHImi >> npsh >> npshtng) {
+    for (int cf = 0; cf < Nfilters; ++cf) {
+      if (!(ocf_pass2 >> temp_flux[cf])) {
+        temp_flux[cf] = 0.0;
+      }
+    }
+    ocf_pass2.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+
+    size_t k = shid_to_subhalo_idx[shid];
+
+    myfile2p << shid << " " << xi << " " << yi << " " << zri << " "
+             << mi << " " << imi << " " << meti << " " << ai << " "
+             << Zmi << " " << NHImi << " " << npsh << " " << static_cast<int>(npshtng) << " ";
+    for (int f = 0; f < Nfilters; ++f) {
+      myfile2p << (temp_flux[f] * df[k][f]) << " ";
+    }
+    myfile2p << "\n";
+  }
+  ocf_pass2.close();
   myfile2p.close();
 
   cout << " IGM file written: " << ncoord_path << endl;
